@@ -1,158 +1,110 @@
 #!/usr/bin/python3
-# File name   : setup.py
-# Author      : Adeept
+# ============================================================================
+# Script de Instalación Completa para Adeept PiCar-B
+# Actualizado para Raspberry Pi OS Bookworm (64-bit) con librerías modernas
+# Autor: Felipe con la ayuda de Gemini
+# Fecha: 2025/08/11
+# ============================================================================
 
 import os
+import sys
 import time
 
-curpath = os.path.realpath(__file__)
-thisPath = "/" + os.path.dirname(curpath)
+def run_cmd(cmd, check_error=True):
+    """Ejecuta un comando en el shell."""
+    print(f"--- Ejecutando: {cmd} ---")
+    status = os.system(cmd)
+    if check_error and status != 0:
+        print(f"\n[ERROR FATAL] El comando falló. El script se detendrá.")
+        sys.exit(1)
 
-def replace_num(file,initial,new_num):  
-    newline=""
-    str_num=str(new_num)
-    with open(file,"r") as f:
-        for line in f.readlines():
-            if(line.find(initial) == 0):
-                line = (str_num+'\n')
-            newline += line
-    with open(file,"w") as f:
-        f.writelines(newline)
+def main():
+    if os.geteuid() != 0:
+        print("[ERROR] Este script debe ejecutarse con 'sudo'.")
+        sys.exit(1)
 
-for x in range(1,4):
-	if os.system("sudo apt-get update") == 0:
-		break
+    print("=== INICIANDO CONFIGURACIÓN DEL PICAR-B PARA BOOKWORM (64-BIT) ===")
+    
+    # --- 1. ACTUALIZACIÓN Y DEPENDENCIAS DEL SISTEMA (APT) ---
+    print("\n=== PASO 1: Actualizando e instalando paquetes del sistema (APT) ===")
+    run_cmd("sudo apt-get update")
+    run_cmd("sudo apt-get upgrade -y")
+    
+    apt_packages = [
+        "python3-pip", "python3-dev", "i2c-tools", "build-essential",
+        "libcamera-apps", "python3-libgpiod", "python3-picamera2"
+    ]
+    run_cmd("sudo apt-get install -y " + " ".join(apt_packages))
 
-os.system("sudo apt-get purge -y wolfram-engine")
-os.system("sudo apt-get purge -y libreoffice*")
-os.system("sudo apt-get -y clean")
-os.system("sudo apt-get -y autoremove")
+    # --- 2. INSTALACIÓN DE LIBRERÍAS DE PYTHON (PIP) ---
+    print("\n=== PASO 2: Instalando librerías de Python (PIP) ===")
+    pip_packages = [
+        "Adafruit-Blinka",
+        "adafruit-circuitpython-pca9685",
+        "adafruit-circuitpython-motor",
+        "mpu6050-raspberrypi",
+        "numpy==2.2.4", # Fijar versión por compatibilidad con OpenCV
+        "opencv-contrib-python",
+        "flask",
+        "flask-cors",
+        "websockets",
+        "imutils",
+        "pybase64",
+        "psutil"
+    ]
+    run_cmd("sudo python3 -m pip install --break-system-packages --upgrade " + " ".join(pip_packages))
 
-# for x in range(1,4):
-# 	if os.system("sudo apt-get -y upgrade") == 0:
-# 		break
+    # --- 3. CONFIGURACIÓN DE HARDWARE ---
+    print("\n=== PASO 3: Configurando interfaces de hardware (I2C) ===")
+    # Este paso suele requerir 'sudo raspi-config', pero podemos intentarlo con sed
+    # Se recomienda ejecutar 'sudo raspi-config' -> 3 -> I5 para asegurar que I2C esté activo.
+    run_cmd("sudo raspi-config nonint do_i2c 0")
+    print("Interfaz I2C habilitada.")
 
-for x in range(1,4):
-	if os.system("sudo pip3 install -U pip") == 0:
-		break
+    # --- 4. CONFIGURACIÓN DEL SERVICIO DE AUTOARRANQUE (SYSTEMD) ---
+    print("\n=== PASO 4: Creando servicio de autoinicio (systemd) ===")
+    project_path = os.getcwd() # Asume que el script se ejecuta desde la carpeta raíz del proyecto
+    
+    service_content = f"""[Unit]
+Description=PiCar-B Auto Start Service
+After=network.target
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python-dev python-pip libfreetype6-dev libjpeg-dev build-essential") == 0:
-		break
+[Service]
+ExecStart=/usr/bin/python3 {project_path}/server/webServer.py
+WorkingDirectory={project_path}/server
+StandardOutput=journal
+StandardError=journal
+Restart=always
+User=root
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y swig") == 0:
-		break
+[Install]
+WantedBy=multi-user.target
+"""
+    service_path = "/etc/systemd/system/picarb.service"
+    try:
+        with open(service_path, "w") as f:
+            f.write(service_content)
+        print(f"[OK] Fichero de servicio creado en '{service_path}'")
+    except Exception as e:
+        print(f"[ERROR] No se pudo crear el fichero de servicio: {e}")
+        sys.exit(1)
+        
+    run_cmd("sudo systemctl daemon-reload")
+    run_cmd("sudo systemctl enable picarb.service")
+    
+    print("\n" + "="*50)
+    print("      ✅ ¡INSTALACIÓN COMPLETADA CON ÉXITO! ✅")
+    print("="*50)
+    print("\nEl servicio 'picarb.service' se iniciará en el próximo arranque.")
+    print("Es necesario reiniciar para que todos los cambios surtan efecto.")
+    
+    reboot_choice = input("\n¿Deseas reiniciar ahora? (s/N): ")
+    if reboot_choice.lower() == 's':
+        print("Reiniciando en 5 segundos...")
+        time.sleep(5)
+        os.system("sudo reboot")
+    else:
+        print("\n[AVISO] Recuerda reiniciar manualmente con 'sudo reboot'.")
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y flac") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y bison libasound2-dev swig") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo -H pip3 install --upgrade luma.oled") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y i2c-tools") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python3-opencv") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install adafruit-pca9685") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install rpi_ws281x") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python3-smbus") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install mpu6050-raspberrypi") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask_cors") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install websockets") == 0:
-		break
-
-try:
-	replace_num("/boot/config.txt",'#dtparam=i2c_arm=on','dtparam=i2c_arm=on\nstart_x=1\n')
-except:
-	print('try again')
-
-
-for x in range(1,4):
-	if os.system("sudo pip3 install numpy") == 0:
-		break
-
-
-for x in range(1,4):
-	if os.system("sudo apt-get -y install libqtgui4 libhdf5-dev libhdf5-serial-dev libatlas-base-dev libjasper-dev libqt4-test") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install imutils zmq pybase64 psutil") == 0:   ####
-		break
-
-for x in range(1,4):
-	if os.system("sudo git clone https://github.com/oblique/create_ap") == 0:
-		break
-
-try:
-	os.system("cd " + thisPath + "/create_ap && sudo make install")
-except:
-	pass
-
-try:
-	os.system("cd //home/pi/create_ap && sudo make install")
-except:
-	pass
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y util-linux procps hostapd iproute2 iw haveged dnsmasq") == 0:
-		break
-
-try:
-	os.system('sudo touch //home/pi/startup.sh')
-	with open("//home/pi/startup.sh",'w') as file_to_write:
-		#you can choose how to control the robot
-		file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/webServer.py")
-# 		file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/server.py")
-except:
-	pass
-
-os.system('sudo chmod 777 //home/pi/startup.sh')
-
-replace_num('/etc/rc.local','fi','fi\n//home/pi/startup.sh start')
-
-try: #fix conflict with onboard Raspberry Pi audio
-	os.system('sudo touch /etc/modprobe.d/snd-blacklist.conf')
-	with open("/etc/modprobe.d/snd-blacklist.conf",'w') as file_to_write:
-		file_to_write.write("blacklist snd_bcm2835")
-except:
-	pass
-
-print('The program in Raspberry Pi has been installed, disconnected and restarted. \nYou can now power off the Raspberry Pi to install the camera and driver board (Robot HAT). \nAfter turning on again, the Raspberry Pi will automatically run the program to set the servos port signal to turn the servos to the middle position, which is convenient for mechanical assembly.')
-print('restarting...')
-os.system("sudo reboot")
+if __name__ == "__main__":
+    main()

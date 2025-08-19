@@ -7,7 +7,9 @@ from __future__ import division
 import time
 import RPi.GPIO as GPIO
 import sys
-import Adafruit_PCA9685
+import board
+import busio
+from adafruit_pca9685 import PCA9685
 import ultra
 import RGB
 
@@ -18,8 +20,12 @@ pwm0_direction = -1
 pwm1_direction = 1
 pwm2_direction = 1
 
-pwm = Adafruit_PCA9685.PCA9685()
-pwm.set_pwm_freq(50)
+# Inicializa el bus I2C
+i2c = busio.I2C(board.SCL, board.SDA)
+
+# Crea la instancia del controlador pasándole el bus i2c
+pwm = PCA9685(i2c, address=0x40)
+pwm.frequency = 50
 
 pwm0_init = 300
 pwm0_range = 100
