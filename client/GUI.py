@@ -14,6 +14,7 @@ import asyncio
 import websockets.protocol
 import math
 import os
+import json
 
 try:
     import cv2
@@ -28,6 +29,8 @@ except ImportError:
 # --- Variables Globales y Configuración ---
 DS_stu, TS_stu, color_bg, color_text, color_btn, color_line, color_can, color_oval, target_color = (0,)*9
 speed, ip_stu, Switch_3, Switch_2, Switch_1, servo_stu, function_stu = (0,)*7
+
+function_button_active = None 
 
 def global_init():
     global DS_stu, TS_stu, color_bg, color_text, color_btn, color_line, color_can, color_oval, target_color
@@ -59,10 +62,20 @@ async def network_loop(ip_address, port):
             l_ip_4.config(text='Connected', bg='#558B2F'); l_ip_5.config(text=f'IP:{ip_address}')
             E1.config(state='disabled'); Btn14.config(state='disabled'); ip_stu=0
             await websocket.send("admin:123456")
-            response = await websocket.recv()
-            print(f"Respuesta del servidor: {response}")
+            
             while True:
                 message = await websocket.recv()
+                try:
+                    data = json.loads(message)
+                    if data.get('title') == 'scanResult':
+                        scan_results = data.get('data', [])
+                        print(f"Datos de radar recibidos: {scan_results}")
+                        draw_radar_scan(scan_results)
+                except (json.JSONDecodeError, TypeError):
+                    print(f"Mensaje del servidor (no JSON): {message}")
+                except Exception as e:
+                    print(f"Error procesando mensaje: {e}")
+
     except Exception as e:
         print(f"Error en el bucle de red: {e}")
     finally:
@@ -82,7 +95,7 @@ def start_network_thread():
 def connect(event):
     if ip_stu == 1: start_network_thread()
 
-# --- Lógica de Video (sin cambios) ---
+# --- Lógica de Video ---
 def video_thread():
 	global footage_socket, font, frame_num, fps
 	context = zmq.Context(); footage_socket = context.socket(zmq.SUB)
@@ -109,16 +122,8 @@ if video_support:
 # --- Funciones de Botones y Lógica de la GUI ---
 def call_up(event): send_command('up')
 def call_down(event): send_command('down')
-
-# ---- FUNCIONES DE DIAGNÓSTICO AÑADIDAS ----
-def call_lookleft(event):
-    print("--- Comando: lookleft ---") # Mensaje de diagnóstico
-    send_command('lookleft')
-
-def call_lookright(event):
-    print("--- Comando: lookright ---") # Mensaje de diagnóstico
-    send_command('lookright')
-
+def call_lookleft(event): send_command('lookleft')
+def call_lookright(event): send_command('lookright')
 def call_home(event): send_command('home')
 def call_police(event): send_command('police')
 def call_rainbow(event): send_command('rainbow')
@@ -135,7 +140,6 @@ def call_right(event): global TS_stu; TS_stu=1; send_command('right')
 
 def call_DS(event): global DS_stu; DS_stu=0; send_command('DS')
 def call_TS(event): global TS_stu; TS_stu=0; send_command('TS')
-
 
 def call_Switch_1(event):
     global Switch_1; command = 'Switch_1_on' if Switch_1 == 0 else 'Switch_1_off'
@@ -176,15 +180,43 @@ def call_SET(event): send_command(f'FCSET {rgb2hsv(int(var_R.get()), int(var_G.g
 def EC_send(event): send_command(f'setEC {var_ec.get()}')
 def EC_default(event): send_command('defEC')
 
+def toggle_function(button_widget, start_command, stop_command):
+    global function_button_active, motor_controls, servo_controls
+    
+    # Si ya hay un botón de función activo y no es el que acabamos de pulsar, lo reseteamos
+    if function_button_active and function_button_active != button_widget:
+        function_button_active.config(bg=color_btn)
+
+    # Si el botón que hemos pulsado ya estaba activo, lo desactivamos
+    if function_button_active == button_widget:
+        print(f"Desactivando función ({stop_command})...")
+        send_command(stop_command)
+        button_widget.config(bg=color_btn)
+        function_button_active = None
+        # Reactivamos los controles manuales
+        for btn in motor_controls + servo_controls:
+            btn.config(state='normal')
+    # Si no había nada activo, o era otro botón, activamos este
+    else:
+        print(f"Activando función ({start_command})...")
+        send_command(start_command)
+        button_widget.config(bg='#4CAF50') # Color verde de "activo"
+        function_button_active = button_widget
+        # Desactivamos los controles manuales
+        for btn in motor_controls + servo_controls:
+            btn.config(state='disabled')
+
+
 def call_function_1(event): send_command('scan')
-def call_function_2(event): send_command('findColor')
+def call_function_2(event): toggle_function(Btn_function_2, 'findColor', 'stopCV')
 def call_function_3(event): send_command('motionGet')
-def call_function_4(event): send_command('trackLine')
+def call_function_4(event): toggle_function(Btn_function_4, 'trackLine', 'pauseFunctions')
 def call_function_5(event): send_command('automatic')
 def call_function_6(event): send_command('steadyCamera')
 def call_function_7(event): pass
 
-# --- Creación de la Interfaz Gráfica (Layout Original 100% Restaurado) ---
+
+# --- Creación de la Interfaz Gráfica ---
 def loop():
     global root, var_Speed, var_R_L, var_G_L, var_B_L, var_0, var_1, var_2, var_lip1, var_lip2, var_err, var_R, var_G, var_B, var_ec, Btn_Switch_1, Btn_Switch_2, Btn_Switch_3, E1, Btn14, l_ip_4, l_ip_5
     root = tk.Tk(); root.title('PiCar-B v2.0 GUI'); root.geometry('565x850'); root.config(bg=color_bg)
@@ -195,19 +227,22 @@ def loop():
     try:
         logo=tk.PhotoImage(file='logo.png'); tk.Label(root,image=logo,bg=color_bg).place(x=30,y=13)
     except: pass
-    motor_buttons(30,105); information_screen(330,15); connent_input(125,15); switch_button(30,195); servo_buttons(255,195); scale(30,230,203)    
+    motor_buttons(30,105); information_screen(330,15); connent_input(125,15); switch_button(30,195); servo_buttons(255,195); scale(30,230,203)
     scale_RGB(370,280,172); scale_PWM(370,400,172); ultrasonic_radar(30,290); function_buttons(480,15); scale_FL(30,550,320)
     scale_FC(30,650,320); scale_ExpCom(30,770,320)
     root.mainloop()
 
-# ---- SECCIÓN DE BOTONES DE CONTROL DEL COCHE (SIN CAMBIOS) ----
 def motor_buttons(x,y):
+    global motor_controls
+    motor_controls = []
+
     btn_motor_fwd = tk.Button(root, width=8, text='Forward',fg=color_text,bg=color_btn,relief='ridge')
     btn_motor_fwd.place(x=x+70,y=y)
     btn_motor_fwd.bind('<ButtonPress-1>', call_forward)
     btn_motor_fwd.bind('<ButtonRelease-1>', call_DS)
     root.bind('<KeyPress-w>', call_forward)
-    root.bind('<KeyRelease-w>', call_DS) 
+    root.bind('<KeyRelease-w>', call_DS)
+    motor_controls.append(btn_motor_fwd)
 
     btn_motor_bwd = tk.Button(root, width=8, text='Backward',fg=color_text,bg=color_btn,relief='ridge')
     btn_motor_bwd.place(x=x+70,y=y+35)
@@ -215,6 +250,7 @@ def motor_buttons(x,y):
     btn_motor_bwd.bind('<ButtonRelease-1>', call_DS)
     root.bind('<KeyPress-s>', call_backward)
     root.bind('<KeyRelease-s>', call_DS)
+    motor_controls.append(btn_motor_bwd)
 
     btn_motor_left = tk.Button(root, width=8, text='Left',fg=color_text,bg=color_btn,relief='ridge')
     btn_motor_left.place(x=x,y=y+35)
@@ -222,25 +258,28 @@ def motor_buttons(x,y):
     btn_motor_left.bind('<ButtonRelease-1>', call_TS)
     root.bind('<KeyPress-a>', call_left)
     root.bind('<KeyRelease-a>', call_TS)
+    motor_controls.append(btn_motor_left)
 
     btn_motor_right = tk.Button(root, width=8, text='Right',fg=color_text,bg=color_btn,relief='ridge')
     btn_motor_right.place(x=x+140,y=y+35)
     btn_motor_right.bind('<ButtonPress-1>', call_right)
     btn_motor_right.bind('<ButtonRelease-1>', call_TS)
     root.bind('<KeyPress-d>', call_right)
-    root.bind('<KeyRelease-d>', call_TS) 
+    root.bind('<KeyRelease-d>', call_TS)
+    motor_controls.append(btn_motor_right)
 
-# ---- SECCIÓN DE BOTONES DE LA CÁMARA (MODIFICADA) ----
 def servo_buttons(x,y):
-    global Btn_SR, Btn_Police, Btn_Rainbow, Btn_3 
+    global Btn_SR, Btn_Police, Btn_Rainbow, Btn_3
+    global servo_controls
+    servo_controls = []
 
-    # Al soltar el botón, ahora se llama a 'call_servo_home'
     btn_servo_up = tk.Button(root, width=8, text='Up',fg=color_text,bg=color_btn,relief='ridge')
     btn_servo_up.place(x=x+70,y=y)
     btn_servo_up.bind('<ButtonPress-1>', call_up)
     btn_servo_up.bind('<ButtonRelease-1>', call_servo_home)
     root.bind('<KeyPress-i>', call_up)
-    root.bind('<KeyRelease-i>', call_servo_home) 
+    root.bind('<KeyRelease-i>', call_servo_home)
+    servo_controls.append(btn_servo_up)
 
     btn_servo_down = tk.Button(root, width=8, text='Down',fg=color_text,bg=color_btn,relief='ridge')
     btn_servo_down.place(x=x+70,y=y+35)
@@ -248,6 +287,7 @@ def servo_buttons(x,y):
     btn_servo_down.bind('<ButtonRelease-1>', call_servo_home)
     root.bind('<KeyPress-k>', call_down)
     root.bind('<KeyRelease-k>', call_servo_home)
+    servo_controls.append(btn_servo_down)
 
     btn_servo_left = tk.Button(root, width=8, text='Left',fg=color_text,bg=color_btn,relief='ridge')
     btn_servo_left.place(x=x,y=y+35)
@@ -255,15 +295,16 @@ def servo_buttons(x,y):
     btn_servo_left.bind('<ButtonRelease-1>', call_servo_home)
     root.bind('<KeyPress-j>', call_lookleft)
     root.bind('<KeyRelease-j>', call_servo_home)
-    
+    servo_controls.append(btn_servo_left)
+
     btn_servo_right = tk.Button(root, width=8, text='Right',fg=color_text,bg=color_btn,relief='ridge')
     btn_servo_right.place(x=x+140,y=y+35)
     btn_servo_right.bind('<ButtonPress-1>', call_lookright)
     btn_servo_right.bind('<ButtonRelease-1>', call_servo_home)
     root.bind('<KeyPress-l>', call_lookright)
     root.bind('<KeyRelease-l>', call_servo_home)
+    servo_controls.append(btn_servo_right)
 
-    # El resto de botones de esta sección no necesitan el retorno a home
     Btn_3 = tk.Button(root, width=8, text='SpeechR',fg=color_text,bg=color_btn,relief='ridge')
     Btn_3.place(x=x+140,y=y)
     Btn_3.bind('<ButtonPress-1>', call_sr)
@@ -284,11 +325,8 @@ def servo_buttons(x,y):
     Btn_Rainbow.bind('<ButtonPress-1>', call_rainbow)
     root.bind('<KeyPress-y>', call_rainbow)
     
-    # El comando 'home' ya se usa al soltar los botones, pero dejamos la tecla H por si se quiere centrar manualmente
     root.bind('<KeyPress-h>', call_home)
     
-# ---- FIN DE LA SECCIÓN MODIFICADA ----
-
 def information_screen(x,y):
 	global l_ip_4, l_ip_5; tk.Label(root,width=18,text='CPU Temp:',fg=color_text,bg='#212121').place(x=x,y=y); tk.Label(root,width=18,text='CPU Usage:',fg=color_text,bg='#212121').place(x=x,y=y+30)
 	tk.Label(root,width=18,text='RAM Usage:',fg=color_text,bg='#212121').place(x=x,y=y+60); l_ip_4=tk.Label(root,width=18,text='Disconnected',fg=color_text,bg='#F44336'); l_ip_4.place(x=x,y=y+95)
@@ -301,13 +339,14 @@ def switch_button(x,y):
 	Btn_Switch_3 = tk.Button(root, width=8, text='Port 3',fg=color_text,bg=color_btn,relief='ridge'); Btn_Switch_1.place(x=x,y=y); Btn_Switch_2.place(x=x+70,y=y); Btn_Switch_3.place(x=x+140,y=y)
 	Btn_Switch_1.bind('<ButtonPress-1>', call_Switch_1); Btn_Switch_2.bind('<ButtonPress-1>', call_Switch_2); Btn_Switch_3.bind('<ButtonPress-1>', call_Switch_3)
 def function_buttons(x,y):
-	Btn_function_1 = tk.Button(root, width=8, text='RadarScan',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_2 = tk.Button(root, width=8, text='FindColor',fg=color_text,bg=color_btn,relief='ridge')
-	Btn_function_3 = tk.Button(root, width=8, text='MotionGet',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_4 = tk.Button(root, width=8, text='LineTrack',fg=color_text,bg=color_btn,relief='ridge')
-	Btn_function_5 = tk.Button(root, width=8, text='Automatic',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_6 = tk.Button(root, width=8, text='SteadyCam',fg=color_text,bg=color_btn,relief='ridge')
-	Btn_function_7 = tk.Button(root, width=8, text='Instruction',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_1.place(x=x,y=y); Btn_function_2.place(x=x,y=y+35); Btn_function_3.place(x=x,y=y+70)
-	Btn_function_4.place(x=x,y=y+105); Btn_function_5.place(x=x,y=y+140); Btn_function_7.place(x=x,y=y+215); Btn_function_1.bind('<ButtonPress-1>', call_function_1)
-	Btn_function_2.bind('<ButtonPress-1>', call_function_2); Btn_function_3.bind('<ButtonPress-1>', call_function_3); Btn_function_4.bind('<ButtonPress-1>', call_function_4)
-	Btn_function_5.bind('<ButtonPress-1>', call_function_5); Btn_function_7.bind('<ButtonPress-1>', call_function_7)
+    global Btn_function_2 ,Btn_function_4
+    Btn_function_1 = tk.Button(root, width=8, text='RadarScan',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_2 = tk.Button(root, width=8, text='FindColor',fg=color_text,bg=color_btn,relief='ridge')
+    Btn_function_3 = tk.Button(root, width=8, text='MotionGet',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_4 = tk.Button(root, width=8, text='LineTrack',fg=color_text,bg=color_btn,relief='ridge')
+    Btn_function_5 = tk.Button(root, width=8, text='Automatic',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_6 = tk.Button(root, width=8, text='SteadyCam',fg=color_text,bg=color_btn,relief='ridge')
+    Btn_function_7 = tk.Button(root, width=8, text='Instruction',fg=color_text,bg=color_btn,relief='ridge'); Btn_function_1.place(x=x,y=y); Btn_function_2.place(x=x,y=y+35); Btn_function_3.place(x=x,y=y+70)
+    Btn_function_4.place(x=x,y=y+105); Btn_function_5.place(x=x,y=y+140); Btn_function_7.place(x=x,y=y+215); Btn_function_1.bind('<ButtonPress-1>', call_function_1)
+    Btn_function_2.bind('<ButtonPress-1>', call_function_2); Btn_function_3.bind('<ButtonPress-1>', call_function_3); Btn_function_4.bind('<ButtonPress-1>', call_function_4)
+    Btn_function_5.bind('<ButtonPress-1>', call_function_5); Btn_function_7.bind('<ButtonPress-1>', call_function_7)
 def scale(x,y,w):
 	tk.Scale(root,label=None,from_=60,to=100,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=10,variable=var_Speed,troughcolor='#448AFF',command=speed_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
 def scale_RGB(x,y,w):
@@ -320,9 +359,40 @@ def scale_PWM(x,y,w):
 	tk.Scale(root,label=None,from_=200,to=400,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_2,troughcolor='#212121',command=pwm2_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y+60)
 	Btn_Save = tk.Button(root, width=23, text='Save as Default',fg=color_text,bg='#212121',relief='ridge'); Btn_Save.place(x=x+1,y=y+110); Btn_Save.bind('<ButtonPress-1>', call_Save)
 def ultrasonic_radar(x,y):
+    global can_scan
     can_scan = tk.Canvas(root,bg=color_can,height=250,width=320,highlightthickness=0); can_scan.place(x=x,y=y); can_scan.create_line(0,62,320,62,fill='darkgray'); can_scan.create_line(0,124,320,124,fill='darkgray')
     can_scan.create_line(0,186,320,186,fill='darkgray'); can_scan.create_line(160,0,160,250,fill='darkgray'); can_scan.create_line(80,0,80,250,fill='darkgray'); can_scan.create_line(240,0,240,250,fill='darkgray')
     can_scan.create_text((27,178),text='%sm'%round((2/4),2),fill='#aeea00'); can_scan.create_text((27,116),text='%sm'%round((2/2),2),fill='#aeea00'); can_scan.create_text((27,54),text='%sm'%round((2*0.75),2),fill='#aeea00')
+
+def draw_radar_scan(scan_data):
+    if not 'can_scan' in globals():
+        print("El canvas del radar no está inicializado.")
+        return
+
+    can_scan.delete("scan_point")
+
+    center_x = 160
+    center_y = 250
+    max_dist_cm = 200.0
+
+    for item in scan_data:
+        dist_m, angle_deg = item
+        dist_cm = dist_m * 100
+
+        if dist_cm <= 0 or dist_cm > max_dist_cm:
+            continue
+
+        angle_rad = math.radians(angle_deg)
+        
+        pixel_dist = (dist_cm / max_dist_cm) * 250
+
+        x = center_x - pixel_dist * math.cos(angle_rad) 
+        y = center_y - pixel_dist * math.sin(angle_rad)
+
+        can_scan.create_oval(x-3, y-3, x+3, y+3,
+                             fill=target_color,
+                             outline=target_color,
+                             tags="scan_point")
 def scale_FL(x,y,w):
 	global Btn_CVFL; tk.Scale(root,label=None,from_=0,to=480,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_lip1,troughcolor='#212121',command=lip1_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
 	tk.Scale(root,label=None,from_=0,to=480,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_lip2,troughcolor='#212121',command=lip2_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y+30)
