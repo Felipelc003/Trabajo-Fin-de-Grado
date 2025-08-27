@@ -27,9 +27,8 @@ def get_camera():
 def gen():
     """Generador de streaming de vídeo."""
     cam = get_camera() # Obtiene o crea la instancia de la cámara aquí
-    frames_generator = cam.get_frame()
     while True:
-        frame = next(frames_generator)
+        frame = cam.get_frame()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 

@@ -2,7 +2,7 @@
 # File name   : functions.py
 # Description : Control Functions using modern libraries
 # Author      : William (Adaptado por Felipe y Gemini)
-# Date        : 2025/08/11
+# Date        : 2025/08/22
 
 import time
 import RPi.GPIO as GPIO
@@ -12,7 +12,8 @@ import json
 import ultra
 import Kalman_filter
 import move
-import RPIservo # Nuestro RPIservo.py moderno
+import RPIservo
+import asyncio # <--- Importante añadir asyncio
 
 # --- Definiciones de Servos para Claridad ---
 SERVO_TILT = 0     # Servo de inclinación vertical de la cámara
@@ -20,25 +21,18 @@ SERVO_PAN = 1      # Servo de giro horizontal de la cámara
 SERVO_STEERING = 2 # Servo de dirección de las ruedas
 
 # --- Inicialización de Módulos ---
-# NOTA: Se han eliminado las inicializaciones de 'ServoCtrl' y 'PCA9685'
-# RPIservo.py se encarga de todo el hardware de servos.
 move.setup()
 kalman_filter_X = Kalman_filter.Kalman_filter(0.01, 0.1)
+line_pin_right, line_pin_middle, line_pin_left = 20, 16, 19
 
-# La configuración de pines para el seguidor de línea se mantiene igual
-line_pin_right = 20
-line_pin_middle = 16
-line_pin_left = 19
-
-# MPU6050 (Giroscopio/Acelerómetro) - Puede necesitar instalación de librería
 MPU_connection = 1
 try:
-    from mpu6050 import mpu6050
-    sensor = mpu6050(0x68)
-    print('mpu6050 conectado.')
+    from mpu6500 import mpu6500
+    sensor = mpu6500(0x68)
+    print('mpu6500 conectado.')
 except:
     MPU_connection = 0
-    print('mpu6050 desconectado o librería no instalada. El modo "Steady" no funcionará.')
+    print('mpu6500 desconectado o librería no instalada. El modo "Steady" no funcionará.')
 
 def setup_line_pins():
     GPIO.setwarnings(False)
@@ -51,43 +45,59 @@ class Functions(threading.Thread):
     def __init__(self, *args, **kwargs):
         self.functionMode = 'none'
         self.steadyGoal = 0
+        self.websocket = None # Para guardar el canal de comunicación
+        self.event_loop = None  # Para enviar mensajes de forma segura
         setup_line_pins()
 
         super(Functions, self).__init__(*args, **kwargs)
         self.__flag = threading.Event()
         self.__flag.clear()
 
+    def send_radar_data(self, distance, angle):
+        """ Envía un único punto de datos del radar al cliente. """
+        if self.websocket and self.event_loop:
+            try:
+                # El formato es una lista que contiene una sola lista de [distancia, angulo]
+                response = {'title': 'scanResult', 'data': [[distance, angle]]}
+                # Enviamos el mensaje de forma segura desde el hilo
+                asyncio.run_coroutine_threadsafe(
+                    self.websocket.send(json.dumps(response)),
+                    self.event_loop
+                )
+            except Exception as e:
+                print(f"Error al enviar datos del radar: {e}")
+
     def radarScan(self):
-        """ Realiza un escaneo de radar moviendo el servo de paneo (PAN). """
         print("Iniciando escaneo de radar...")
-        result = []
-        RPIservo.move(SERVO_TILT, 90) # Pone el tilt en el centro
+        full_scan_result = []
+        RPIservo.move(SERVO_TILT, 90)
         time.sleep(0.5)
 
-        # Barrido de 0 a 180 grados
-        for angle in range(0, 181, 3): # Escanea en pasos de 3 grados
+        for angle in range(0, 181, 10): # Pasos más grandes para un escaneo más rápido
             RPIservo.move(SERVO_PAN, angle)
-            time.sleep(0.03) # Pequeña pausa para que el servo llegue
+            time.sleep(0.05)
             dist = ultra.checkdist()
-            if dist < 5: # Ignora distancias muy lejanas (posible ruido)
-                # El ángulo para el resultado es el mismo que el del servo
-                result.append([dist, angle])
+            if dist < 5:
+                full_scan_result.append([dist, angle])
 
-        # Vuelve al centro
         time.sleep(0.5)
         RPIservo.move(SERVO_PAN, 90)
         print("Escaneo de radar finalizado.")
-        return result
+        return full_scan_result
 
     def pause(self):
         self.functionMode = 'none'
+        self.websocket = None # Limpiamos el websocket al pausar
+        self.event_loop = None
         move.motorStop()
         self.__flag.clear()
 
     def resume(self):
         self.__flag.set()
 
-    def automatic(self):
+    def automatic(self, websocket, loop):
+        self.websocket = websocket # Guardamos el websocket y el loop
+        self.event_loop = loop
         self.functionMode = 'Automatic'
         self.resume()
 
@@ -95,139 +105,85 @@ class Functions(threading.Thread):
         self.functionMode = 'trackLine'
         self.resume()
 
-    def keepDistance(self):
-        self.functionMode = 'keepDistance'
-        self.resume()
-
-    def steady(self, goalPos):
-        if MPU_connection == 0:
-            print("Modo Steady no disponible, MPU6050 no conectado.")
-            return
-        self.functionMode = 'Steady'
-        # 'goalPos' era un valor PWM, ahora necesitamos un ángulo. Usamos 90 (centro).
-        self.steadyGoal = 90 
-        self.resume()
-
-    def trackLineProcessing(self):
-        status_right = GPIO.input(line_pin_right)
-        status_middle = GPIO.input(line_pin_middle)
-        status_left = GPIO.input(line_pin_left)
-
-        if status_middle == 0: # Línea en el centro
-            RPIservo.move(SERVO_STEERING, 90) # Dirección recta
-            move.motor_left(1, 0, 80)
-            move.motor_right(1, 0, 80)
-        elif status_left == 0: # Línea a la izquierda
-            RPIservo.move(SERVO_STEERING, 45) # Gira a la izquierda
-            move.motor_left(1, 0, 80)
-            move.motor_right(1, 0, 80)
-        elif status_right == 0: # Línea a la derecha
-            RPIservo.move(SERVO_STEERING, 135) # Gira a la derecha
-            move.motor_left(1, 0, 80)
-            move.motor_right(1, 0, 80)
-        else: # No hay línea
-            move.motorStop()
-        time.sleep(0.1)
-
     def automaticProcessing(self):
-        """ Lógica de evasión de obstáculos. """
-        RPIservo.move(SERVO_PAN, 90) # Mira al frente
-        dist = ultra.checkdist() * 100 # a cm
-        print(f"Distancia: {dist:.2f} cm")
+        """ Lógica de evasión de obstáculos CON envío de datos de radar. """
+        # 1. Mirar al frente y medir
+        current_angle = 90
+        RPIservo.move(SERVO_PAN, current_angle)
+        time.sleep(0.2)
+        dist = ultra.checkdist()
+        self.send_radar_data(dist, current_angle) # Enviamos el dato
+        print(f"Distancia frontal: {dist*100:.2f} cm")
 
-        if dist > 40:
-            RPIservo.move(SERVO_STEERING, 90) # Recto
+        if dist * 100 > 40: # Si hay más de 40 cm, avanza
+            RPIservo.move(SERVO_STEERING, 90)
             move.motor_left(1, 0, 80)
             move.motor_right(1, 0, 80)
-        elif dist > 20:
+        elif dist * 100 > 20: # Si está entre 20 y 40 cm, decide a dónde girar
             move.motorStop()
-            RPIservo.move(SERVO_PAN, 160) # Mira a la izquierda
+            
+            # 2. Mirar a la izquierda y medir
+            left_angle = 160
+            RPIservo.move(SERVO_PAN, left_angle)
             time.sleep(0.3)
-            dist_left = ultra.checkdist() * 100
-
-            RPIservo.move(SERVO_PAN, 20) # Mira a la derecha
+            dist_left = ultra.checkdist()
+            self.send_radar_data(dist_left, left_angle) # Enviamos el dato
+            
+            # 3. Mirar a la derecha y medir
+            right_angle = 20
+            RPIservo.move(SERVO_PAN, right_angle)
             time.sleep(0.3)
-            dist_right = ultra.checkdist() * 100
+            dist_right = ultra.checkdist()
+            self.send_radar_data(dist_right, right_angle) # Enviamos el dato
 
-            RPIservo.move(SERVO_PAN, 90) # Vuelve al centro
+            RPIservo.move(SERVO_PAN, 90) # Volver al centro
+            
             if dist_left > dist_right:
-                print("Girando a la izquierda")
+                print("Decisión: Girar a la izquierda")
                 RPIservo.move(SERVO_STEERING, 45)
-                move.motor_left(1, 1, 80) # Gira sobre sí mismo
+                move.motor_left(1, 1, 80)
                 move.motor_right(1, 0, 80)
             else:
-                print("Girando a la derecha")
+                print("Decisión: Girar a la derecha")
                 RPIservo.move(SERVO_STEERING, 135)
-                move.motor_left(1, 0, 80) # Gira sobre sí mismo
+                move.motor_left(1, 0, 80)
                 move.motor_right(1, 1, 80)
             time.sleep(0.5)
-        else:
-            print("Marcha atrás")
+        else: # Si está a menos de 20 cm, marcha atrás
+            print("Decisión: Marcha atrás")
             move.motor_left(1, 1, 80)
             move.motor_right(1, 1, 80)
             time.sleep(0.5)
             move.motorStop()
 
-    def steadyProcessing(self):
-        if MPU_connection:
-            accel_data = sensor.get_accel_data()
-            x_accel = accel_data['x']
-            x_filtered = kalman_filter_X.kalman(x_accel)
+    def trackLineProcessing(self):
+        # ... (esta función no ha cambiado)
+        status_right = GPIO.input(line_pin_right)
+        status_middle = GPIO.input(line_pin_middle)
+        status_left = GPIO.input(line_pin_left)
 
-            # Mapea la aceleración a un ángulo de corrección
-            # Este factor de '20' puede necesitar ajuste
-            correction_angle = x_filtered * 20
-
-            # Calcula el nuevo ángulo del servo
-            new_angle = self.steadyGoal + correction_angle
-
-            # Limita el ángulo para no forzar el servo
-            if new_angle < 45: new_angle = 45
-            if new_angle > 135: new_angle = 135
-
-            RPIservo.move(SERVO_TILT, new_angle)
-        time.sleep(0.05)
-
-    def keepDisProcessing(self):
-        distance_to_keep = 0.4 # Mantener 40 cm
-        dist = ultra.checkdist()
-
-        if dist > distance_to_keep + 0.1:
-            move.motor_left(1, 0, 70)
-            move.motor_right(1, 0, 70)
-        elif dist < distance_to_keep - 0.1:
-            move.motor_left(1, 1, 70)
-            move.motor_right(1, 1, 70)
+        if status_middle == 0:
+            RPIservo.move(SERVO_STEERING, 90)
+            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+        elif status_left == 0:
+            RPIservo.move(SERVO_STEERING, 45)
+            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+        elif status_right == 0:
+            RPIservo.move(SERVO_STEERING, 135)
+            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
         else:
             move.motorStop()
+        time.sleep(0.1)
 
     def functionGoing(self):
         if self.functionMode == 'none':
             self.pause()
         elif self.functionMode == 'Automatic':
             self.automaticProcessing()
-        elif self.functionMode == 'Steady':
-            self.steadyProcessing()
         elif self.functionMode == 'trackLine':
             self.trackLineProcessing()
-        elif self.functionMode == 'keepDistance':
-            self.keepDisProcessing()
-
+    
     def run(self):
         while True:
             self.__flag.wait()
             self.functionGoing()
-
-if __name__ == '__main__':
-    # Bloque de prueba
-    try:
-        fuc = Functions()
-        fuc.start()
-        print("Iniciando prueba de seguimiento de línea.")
-        fuc.trackLine()
-        time.sleep(10)
-        print("Deteniendo prueba.")
-        fuc.pause()
-        time.sleep(1)
-    except KeyboardInterrupt:
-        move.motorStop()

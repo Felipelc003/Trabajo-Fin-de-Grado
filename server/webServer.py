@@ -32,8 +32,8 @@ def robotCtrl(command):
     elif 'left' == command: RPIservo.move(SERVO_STEERING, 45)
     elif 'right' == command: RPIservo.move(SERVO_STEERING, 135)
     elif 'TS' in command: RPIservo.move(SERVO_STEERING, 90)
-    elif 'lookleft' == command: RPIservo.move(SERVO_PAN, 45)
-    elif 'lookright' == command: RPIservo.move(SERVO_PAN, 135)
+    elif 'lookleft' == command: RPIservo.move(SERVO_PAN, 135)
+    elif 'lookright' == command: RPIservo.move(SERVO_PAN, 45)
     elif 'up' == command: RPIservo.move(SERVO_TILT, 135)
     elif 'down' == command: RPIservo.move(SERVO_TILT, 45)
     elif 'home' == command: servoPosInit()
@@ -57,22 +57,79 @@ async def recv_msg(websocket):
             raw_data = await websocket.recv()
             parts = raw_data.split(); command = parts[0]
             value = ' '.join(parts[1:]) if len(parts) > 1 else None
-            if command in ['forward','backward','DS','left','right','TS','lookleft','lookright','up','down','home']: robotCtrl(command)
-            elif command in ['police','rainbow'] and RL: getattr(RL, command)()
-            elif command == 'Speed' and value: speed_set = int(value); move.set_speed(speed_set)
+            
+            if command in ['forward','backward','DS','left','right','TS','lookleft','lookright','up','down','home']:
+                robotCtrl(command)
+            
+            elif command == 'scan':
+                print("📡 Iniciando escaneo de radar...")
+                scan_data = fuc.radarScan()
+                response = {'title': 'scanResult', 'data': scan_data}
+                await websocket.send(json.dumps(response))
+
+            elif command == 'trackLine':
+                print("Función 'Seguimiento de Línea' activada.")
+                servoPosInit()
+                fuc.trackLine()
+
+            elif command == 'pauseFunctions':
+                print("Pausando todas las funciones activas.")
+                fuc.pause()
+
+            # En la función recv_msg de webServer.py
+            elif command == 'automatic':
+                print("🤖 Activando modo 'Automático' con radar en vivo.")
+                # Le pasamos el websocket y el event loop al hilo de funciones
+                fuc.automatic(websocket, asyncio.get_event_loop())
+
+            elif command == 'findColor':
+                print("🎥 Activando modo 'Buscar Color' en el stream de vídeo.")
+                if flask_app:
+                    flask_app.modeselect('findColor')
+
+            elif command == 'motionGet':
+                print("🎥 Activando modo 'Detección de Movimiento'.")
+                if flask_app:
+                    flask_app.modeselect('watchDog')
+
+            elif command == 'stopCV':
+                print("🎥 Deteniendo todos los modos de Visión Artificial.")
+                if flask_app:
+                    flask_app.modeselect('none')
+
+            elif command in ['police','rainbow'] and RL:
+                getattr(RL, command)()
+            
+            elif command == 'Speed' and value:
+                speed_set = int(value)
+                move.set_speed(speed_set)
+
+            elif command == 'FCSET' and value:
+                print(f"🎨 Recibidos nuevos valores HSV: {value}")
+                try:
+                    # El valor llega como 'H S V', lo separamos y convertimos a entero
+                    h, s, v = map(int, value.split())
+                    if flask_app:
+                        flask_app.colorFindSet(h, s, v)
+                except Exception as e:
+                    print(f"Error al procesar valores HSV: {e}")
+
         except websockets.exceptions.ConnectionClosed:
             move.motorStop(); 
             if RL: RL.front_all_off(); RL.breath(0.3, 0.3, 1.0)
             break
-        except Exception as e: print(f"Error procesando comando: {e}")
+        except Exception as e:
+            print(f"Error procesando comando: {e}")
 
 async def main_logic(websocket, path):
     if await websocket.recv() == "admin:123456":
         await websocket.send("congratulation"); await recv_msg(websocket)
-    else: await websocket.send("sorry")
+    else:
+        await websocket.send("sorry")
 
 async def main():
-    async with websockets.serve(main_logic, "0.0.0.0", 8888): await asyncio.Future()
+    async with websockets.serve(main_logic, "0.0.0.0", 8888):
+        await asyncio.Future()
 
 if __name__ == '__main__':
     try:
@@ -81,13 +138,16 @@ if __name__ == '__main__':
     except Exception as e: 
         print(f"ADVERTENCIA: No se pudo instanciar el controlador de luces: {e}")
         RL = None
+    
     servoPosInit()
     flask_app = app.webapp()
     flask_app.startthread()
     wifi_check()
+    
     try:
         print("Servidor Websocket esperando en 0.0.0.0:8888..."); asyncio.run(main())
-    except KeyboardInterrupt: print("\nServidor detenido.")
+    except KeyboardInterrupt:
+        print("\nServidor detenido.")
     finally:
         print("Limpiando recursos..."); move.destroy(); RPIservo.cleanup()
         if RL: RL.cleanup()
