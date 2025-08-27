@@ -49,9 +49,9 @@ if command_select == '1':
 			os.system('sudo rm -rf //home/pi/.config/autostart')
 		except:
 			pass
-		os.system('sudo mkdir //home/pi/.config/autostart')
-		os.system('sudo touch //home/pi/.config/autostart/car.desktop')
-		with open("//home/pi/.config/autostart/car.desktop",'w') as file_to_write:
+		os.system('sudo mkdir //home/felipe/.config/autostart')
+		os.system('sudo touch //home/felipe/.config/autostart/car.desktop')
+		with open("//home/felipe/.config/autostart/car.desktop",'w') as file_to_write:
 			file_to_write.write("[Desktop Entry]\n   Name=Car\n   Comment=Car\n   Exec=sudo python3 %sserver.py\n   Icon=false\n   Terminal=false\n   MutipleArgs=false\n   Type=Application\n   Catagories=Application;Development;\n   StartupNotify=true"%path_get)
 		print('The sound version will start when boot')
 	except:
@@ -59,12 +59,12 @@ if command_select == '1':
 elif command_select == '2':
 	try:
 		try:
-			os.system('sudo rm -rf //home/pi/.config/autostart')
+			os.system('sudo rm -rf //home/felipe/.config/autostart')
 		except:
 			pass
-		os.system('sudo mkdir //home/pi/.config/autostart')
-		os.system('sudo touch //home/pi/.config/autostart/car.desktop')
-		with open("//home/pi/.config/autostart/car.desktop",'w') as file_to_write:
+		os.system('sudo mkdir //home/felipe/.config/autostart')
+		os.system('sudo touch //home/felipe/.config/autostart/car.desktop')
+		with open("//home/felipe/.config/autostart/car.desktop",'w') as file_to_write:
 			file_to_write.write("[Desktop Entry]\n   Name=Car\n   Comment=Car\n   Exec=sudo python3 %sserverTest.py\n   Icon=false\n   Terminal=false\n   MutipleArgs=false\n   Type=Application\n   Catagories=Application;Development;\n   StartupNotify=true"%path_get)
 		print('The Test version(without OpenCV) will start when boot')
 	except:

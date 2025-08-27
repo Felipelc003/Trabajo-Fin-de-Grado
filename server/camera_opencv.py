@@ -1,477 +1,176 @@
+# camera_opencv.py (VERSIÓN CON CORRECCIÓN DE COLOR FORZADA Y DEFINITIVA)
 import os
 import cv2
 from base_camera import BaseCamera
 import RPIservo
 import numpy as np
 import move
-import switch
 import datetime
-import Kalman_filter
-import PID
-import time
 import threading
 import imutils
-import robotLight
-import RPIservo
 
-led = robotLight.RobotLight()
-pid = PID.PID()
-pid.SetKp(0.5)
-pid.SetKd(0)
-pid.SetKi(0)
+# --- Clase para todo el procesamiento de Visión por Computadora ---
+class CVProcessor(threading.Thread):
+    def __init__(self):
+        super(CVProcessor, self).__init__()
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        self.mode = 'none'
+        self.is_processing = False
+        self.img_to_process = None
+        self.drawing_elements = {}
 
-CVRun = 1
-linePos_1 = 440
-linePos_2 = 380
-lineColorSet = 255
-frameRender = 1
-findLineError = 20
+        self.color_upper = np.array([44, 255, 255])
+        self.color_lower = np.array([24, 100, 100])
+        self.avg_background = None
+        
+        self._flag = threading.Event()
+        self._flag.clear()
 
-ImgIsNone = 0
-
-colorUpper = np.array([44, 255, 255])
-colorLower = np.array([24, 100, 100])
-
-class CVThread(threading.Thread):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    kalman_filter_X =  Kalman_filter.Kalman_filter(0.01,0.1)
-    kalman_filter_Y =  Kalman_filter.Kalman_filter(0.01,0.1)
-    P_direction = -1
-    T_direction = -1
-    P_servo = 1
-    T_servo = 0
-    P_anglePos = 0
-    T_anglePos = 0
-    cameraDiagonalW = 64
-    cameraDiagonalH = 48
-    videoW = 640
-    videoH = 480
-    Y_lock = 0
-    X_lock = 0
-    tor = 27
-
-    scGear = RPIservo.ServoCtrl()
-    scGear.moveInit()
-    move.setup()
-    switch.switchSetup()
-
-    def __init__(self, *args, **kwargs):
-        self.CVThreading = 0
-        self.CVMode = 'none'
-        self.imgCV = None
-
-        self.mov_x = None
-        self.mov_y = None
-        self.mov_w = None
-        self.mov_h = None
-
-        self.radius = 0
-        self.box_x = None
-        self.box_y = None
-        self.drawing = 0
-
-        self.findColorDetection = 0
-
-        self.left_Pos1 = None
-        self.right_Pos1 = None
-        self.center_Pos1 = None
-
-        self.left_Pos2 = None
-        self.right_Pos2 = None
-        self.center_Pos2 = None
-
-        self.center = None
-
-        super(CVThread, self).__init__(*args, **kwargs)
-        self.__flag = threading.Event()
-        self.__flag.clear()
-
-        self.avg = None
-        self.motionCounter = 0
-        self.lastMovtionCaptured = datetime.datetime.now()
-        self.frameDelta = None
-        self.thresh = None
-        self.cnts = None
-
-    def mode(self, invar, imgInput):
-        self.CVMode = invar
-        self.imgCV = imgInput
+    def set_mode(self, new_mode, image):
+        self.mode = new_mode
+        self.img_to_process = image
         self.resume()
 
-    def elementDraw(self,imgInput):
-        if self.CVMode == 'none':
-            pass
-
-        elif self.CVMode == 'findColor':
-            if self.findColorDetection:
-                cv2.putText(imgInput,'Target Detected',(40,60), CVThread.font, 0.5,(255,255,255),1,cv2.LINE_AA)
-                self.drawing = 1
-            else:
-                cv2.putText(imgInput,'Target Detecting',(40,60), CVThread.font, 0.5,(255,255,255),1,cv2.LINE_AA)
-                self.drawing = 0
-
-            if self.radius > 10 and self.drawing:
-                cv2.rectangle(imgInput,(int(self.box_x-self.radius),int(self.box_y+self.radius)),(int(self.box_x+self.radius),int(self.box_y-self.radius)),(255,255,255),1)
-
-        elif self.CVMode == 'findlineCV':
-            if frameRender:
-                imgInput = cv2.cvtColor(imgInput, cv2.COLOR_BGR2GRAY)
-                retval_bw, imgInput =  cv2.threshold(imgInput, 0, 255, cv2.THRESH_OTSU)
-                imgInput = cv2.erode(imgInput, None, iterations=6)
-            try:
-                if lineColorSet == 255:
-                    cv2.putText(imgInput,('Following White Line'),(30,50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,(128,255,128),1,cv2.LINE_AA)
-                else:
-                    cv2.putText(imgInput,('Following Black Line'),(30,50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,(128,255,128),1,cv2.LINE_AA)
-
-                cv2.line(imgInput,(self.left_Pos1,(linePos_1+30)),(self.left_Pos1,(linePos_1-30)),(255,128,64),1)
-                cv2.line(imgInput,(self.right_Pos1,(linePos_1+30)),(self.right_Pos1,(linePos_1-30)),(64,128,255),)
-                cv2.line(imgInput,(0,linePos_1),(640,linePos_1),(255,255,64),1)
-
-                cv2.line(imgInput,(self.left_Pos2,(linePos_2+30)),(self.left_Pos2,(linePos_2-30)),(255,128,64),1)
-                cv2.line(imgInput,(self.right_Pos2,(linePos_2+30)),(self.right_Pos2,(linePos_2-30)),(64,128,255),1)
-                cv2.line(imgInput,(0,linePos_2),(640,linePos_2),(255,255,64),1)
-
-                cv2.line(imgInput,((self.center-20),int((linePos_1+linePos_2)/2)),((self.center+20),int((linePos_1+linePos_2)/2)),(0,0,0),1)
-                cv2.line(imgInput,((self.center),int((linePos_1+linePos_2)/2+20)),((self.center),int((linePos_1+linePos_2)/2-20)),(0,0,0),1)
-            except:
-                pass
-
-        elif self.CVMode == 'watchDog':
-            if self.drawing:
-                cv2.rectangle(imgInput, (self.mov_x, self.mov_y), (self.mov_x + self.mov_w, self.mov_y + self.mov_h), (128, 255, 0), 1)
-
-        return imgInput
-
-
-    def watchDog(self, imgInput):
-        timestamp = datetime.datetime.now()
-        gray = cv2.cvtColor(imgInput, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
-
-        if self.avg is None:
-            print("[INFO] starting background model...")
-            self.avg = gray.copy().astype("float")
-            return 'background model'
-
-        cv2.accumulateWeighted(gray, self.avg, 0.5)
-        self.frameDelta = cv2.absdiff(gray, cv2.convertScaleAbs(self.avg))
-
-        # threshold the delta image, dilate the thresholded image to fill
-        # in holes, then find contours on thresholded image
-        self.thresh = cv2.threshold(self.frameDelta, 5, 255,
-            cv2.THRESH_BINARY)[1]
-        self.thresh = cv2.dilate(self.thresh, None, iterations=2)
-        self.cnts = cv2.findContours(self.thresh.copy(), cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE)
-        self.cnts = imutils.grab_contours(self.cnts)
-        # print('x')
-        # loop over the contours
-        for c in self.cnts:
-            # if the contour is too small, ignore it
-            if cv2.contourArea(c) < 5000:
-                continue
-     
-            # compute the bounding box for the contour, draw it on the frame,
-            # and update the text
-            (self.mov_x, self.mov_y, self.mov_w, self.mov_h) = cv2.boundingRect(c)
-            self.drawing = 1
-            
-            self.motionCounter += 1
-            #print(motionCounter)
-            #print(text)
-            self.lastMovtionCaptured = timestamp
-            led.setColor(255,78,0)
-            led.both_off()
-            led.red()
-            # switch.switch(1,1)
-            # switch.switch(2,1)
-            # switch.switch(3,1)
-
-        if (timestamp - self.lastMovtionCaptured).seconds >= 0.5:
-            led.setColor(0,78,255)
-            led.both_off()
-            led.blue()
-            self.drawing = 0
-            # switch.switch(1,0)
-            # switch.switch(2,0)
-            # switch.switch(3,0)
-        self.pause()
-
-
-    def findLineCtrl(self, posInput, setCenter):#2
-        if posInput:
-            if posInput > (setCenter + findLineError):
-                # move.motorStop()
-                #turnRight
-                error = (posInput-320)/3
-                outv = int(round((pid.GenOut(error)),0))
-                CVThread.scGear.moveAngle(2,-outv)
-                if CVRun:
-                    move.motor_left(1, 0, 80)
-                    move.motor_right(1, 0, 80)
-                else:
-                    move.motorStop()
-                pass
-            elif posInput < (setCenter - findLineError):
-                # move.motorStop()
-                #turnLeft
-                error = (320-posInput)/3
-                outv = int(round((pid.GenOut(error)),0))
-                CVThread.scGear.moveAngle(2,outv)
-                if CVRun:
-                    move.motor_left(1, 0, 80)
-                    move.motor_right(1, 0, 80)
-                else:
-                    move.motorStop()
-                pass
-            else:
-                if CVRun:
-                    move.motor_left(1, 0, 80)
-                    move.motor_right(1, 0, 80)
-                else:
-                    move.motorStop()
-                #forward
-                pass
-        else:
-            pass
-
-
-    def findlineCV(self, frame_image):
-        frame_findline = cv2.cvtColor(frame_image, cv2.COLOR_BGR2GRAY)
-        retval, frame_findline =  cv2.threshold(frame_findline, 0, 255, cv2.THRESH_OTSU)
-        frame_findline = cv2.erode(frame_findline, None, iterations=6)
-        colorPos_1 = frame_findline[linePos_1]
-        colorPos_2 = frame_findline[linePos_2]
-        try:
-            lineColorCount_Pos1 = np.sum(colorPos_1 == lineColorSet)
-            lineColorCount_Pos2 = np.sum(colorPos_2 == lineColorSet)
-
-            lineIndex_Pos1 = np.where(colorPos_1 == lineColorSet)
-            lineIndex_Pos2 = np.where(colorPos_2 == lineColorSet)
-
-            if lineColorCount_Pos1 == 0:
-                lineColorCount_Pos1 = 1
-            if lineColorCount_Pos2 == 0:
-                lineColorCount_Pos2 = 1
-
-            self.left_Pos1 = lineIndex_Pos1[0][lineColorCount_Pos1-1]
-            self.right_Pos1 = lineIndex_Pos1[0][0]
-            self.center_Pos1 = int((self.left_Pos1+self.right_Pos1)/2)
-
-            self.left_Pos2 = lineIndex_Pos2[0][lineColorCount_Pos2-1]
-            self.right_Pos2 = lineIndex_Pos2[0][0]
-            self.center_Pos2 = int((self.left_Pos2+self.right_Pos2)/2)
-
-            self.center = int((self.center_Pos1+self.center_Pos2)/2)
-        except:
-            center = None
-            pass
-
-        self.findLineCtrl(self.center, 320)
-        self.pause()
-
-
-    def servoMove(ID, Dir, errorInput):
-        if ID == 1:
-            errorGenOut = CVThread.kalman_filter_X.kalman(errorInput)
-            CVThread.P_anglePos += 0.35*(errorGenOut*Dir)*CVThread.cameraDiagonalW/CVThread.videoW
-
-            if abs(errorInput) > CVThread.tor:
-                CVThread.scGear.moveAngle(ID,CVThread.P_anglePos)
-                CVThread.X_lock = 0
-            else:
-                CVThread.X_lock = 1
-        elif ID == 0:
-            errorGenOut = CVThread.kalman_filter_Y.kalman(errorInput)
-            CVThread.T_anglePos += 0.35*(errorGenOut*Dir)*CVThread.cameraDiagonalH/CVThread.videoH
-
-            if abs(errorInput) > CVThread.tor:
-                CVThread.scGear.moveAngle(ID,CVThread.T_anglePos)
-                CVThread.Y_lock = 0
-            else:
-                CVThread.Y_lock = 1
-        else:
-            print('No servoPort %d assigned.'%ID)
-
-
-    def findColor(self, frame_image):
-        hsv = cv2.cvtColor(frame_image, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, colorLower, colorUpper)#1
+    def find_color(self, frame):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.color_lower, self.color_upper)
         mask = cv2.erode(mask, None, iterations=2)
         mask = cv2.dilate(mask, None, iterations=2)
-        cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE)[-2]
-        center = None
+        cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = imutils.grab_contours(cnts)
+        
+        self.drawing_elements = {}
         if len(cnts) > 0:
-            self.findColorDetection = 1
             c = max(cnts, key=cv2.contourArea)
-            ((self.box_x, self.box_y), self.radius) = cv2.minEnclosingCircle(c)
-            M = cv2.moments(c)
-            center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-            X = int(self.box_x)
-            Y = int(self.box_y)
-            error_Y = 240 - Y
-            error_X = 320 - X
-            CVThread.servoMove(CVThread.P_servo, CVThread.P_direction, -error_X)
-            CVThread.servoMove(CVThread.T_servo, CVThread.T_direction, -error_Y)
-
-            if CVThread.X_lock == 1 and CVThread.Y_lock == 1:
-                led.setColor(255,78,0)
-                led.both_off()
-                led.red()
-                print('locked')
-            else:
-                led.setColor(0,78,255)
-                led.both_off()
-                led.blue()
-                print('unlocked')
+            ((box_x, box_y), radius) = cv2.minEnclosingCircle(c)
+            if radius > 10:
+                self.drawing_elements['rect'] = (int(box_x - radius), int(box_y - radius), int(box_x + radius), int(box_y + radius))
+                self.drawing_elements['text'] = 'Target Detected'
         else:
-            self.findColorDetection = 0
-            move.motorStop()
-        self.pause()
+            self.drawing_elements['text'] = 'Target Detecting'
 
+    def watch_dog(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
-    def pause(self):
-        self.__flag.clear()
+        if self.avg_background is None:
+            self.avg_background = gray.copy().astype("float")
+            return
 
-    def resume(self):
-        self.__flag.set()
+        cv2.accumulateWeighted(gray, self.avg_background, 0.5)
+        frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(self.avg_background))
+        thresh = cv2.threshold(frame_delta, 5, 255, cv2.THRESH_BINARY)[1]
+        thresh = cv2.dilate(thresh, None, iterations=2)
+        cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = imutils.grab_contours(cnts)
+        
+        self.drawing_elements.pop('motion_rect', None)
+        for c in cnts:
+            if cv2.contourArea(c) < 5000:
+                continue
+            (x, y, w, h) = cv2.boundingRect(c)
+            self.drawing_elements['motion_rect'] = (x, y, x + w, y + h)
+
+    def draw_elements_on_frame(self, frame):
+        if self.mode == 'findColor':
+            if 'text' in self.drawing_elements:
+                cv2.putText(frame, self.drawing_elements['text'], (40, 60), self.font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            if 'rect' in self.drawing_elements:
+                x1, y1, x2, y2 = self.drawing_elements['rect']
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        elif self.mode == 'watchDog':
+            if 'motion_rect' in self.drawing_elements:
+                x1, y1, x2, y2 = self.drawing_elements['motion_rect']
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        return frame
 
     def run(self):
-        while 1:
-            self.__flag.wait()
-            if self.CVMode == 'none':
+        while True:
+            self._flag.wait()
+            if self.mode == 'none':
+                self.is_processing = False
+                self._flag.clear()
                 continue
-            elif self.CVMode == 'findColor':
-                self.CVThreading = 1
-                self.findColor(self.imgCV)
-                self.CVThreading = 0
-            elif self.CVMode == 'findlineCV':
-                self.CVThreading = 1
-                self.findlineCV(self.imgCV)
-                self.CVThreading = 0
-            elif self.CVMode == 'watchDog':
-                self.CVThreading = 1
-                self.watchDog(self.imgCV)
-                self.CVThreading = 0
-            pass
+            
+            self.is_processing = True
+            if self.img_to_process is not None:
+                if self.mode == 'findColor':
+                    self.find_color(self.img_to_process)
+                elif self.mode == 'watchDog':
+                    self.watch_dog(self.img_to_process)
+            
+            self.is_processing = False
+            self._flag.clear()
 
+    def pause(self):
+        self.mode = 'none'
+        self.drawing_elements = {}
+        self._flag.clear()
+
+    def resume(self):
+        self._flag.set()
 
 class Camera(BaseCamera):
-    video_source = -1
-    modeSelect = 'none'
-    # modeSelect = 'findlineCV'
-    # modeSelect = 'findColor'
-    # modeSelect = 'watchDog'
-
+    _instance = None
 
     def __init__(self):
-        if os.environ.get('OPENCV_CAMERA_SOURCE'):
-            Camera.set_video_source(int(os.environ['OPENCV_CAMERA_SOURCE']))
+        if Camera._instance is not None:
+            raise RuntimeError("Camera is a singleton, use get_instance()")
         super(Camera, self).__init__()
+        self.modeSelect = 'none'
+        self.cv_thread = CVProcessor()
+        self.cv_thread.start()
+        Camera._instance = self
 
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            print("Creando la instancia del objeto Camera por primera vez...")
+            cls._instance = Camera()
+        return cls._instance
 
     def colorFindSet(self, invarH, invarS, invarV):
-        global colorUpper, colorLower
-        HUE_1 = invarH+15
-        HUE_2 = invarH-15
-        if HUE_1>180:HUE_1=180
-        if HUE_2<0:HUE_2=0
-
-        SAT_1 = invarS+150
-        SAT_2 = invarS-150
-        if SAT_1>255:SAT_1=255
-        if SAT_2<0:SAT_2=0
-
-        VAL_1 = invarV+150
-        VAL_2 = invarV-150
-        if VAL_1>255:VAL_1=255
-        if VAL_2<0:VAL_2=0
-
-        colorUpper = np.array([HUE_1, SAT_1, VAL_1])
-        colorLower = np.array([HUE_2, SAT_2, VAL_2])
-        print('HSV_1:%d %d %d'%(HUE_1, SAT_1, VAL_1))
-        print('HSV_2:%d %d %d'%(HUE_2, SAT_2, VAL_2))
-        print(colorUpper)
-        print(colorLower)
-
-    def modeSet(self, invar):
-        Camera.modeSelect = invar
-
-    def CVRunSet(self, invar):
-        global CVRun
-        CVRun = invar
-
-    def linePosSet_1(self, invar):
-        global linePos_1
-        linePos_1 = invar
-
-    def linePosSet_2(self, invar):
-        global linePos_2
-        linePos_2 = invar
-
-    def colorSet(self, invar):
-        global lineColorSet
-        lineColorSet = invar
-
-    def randerSet(self, invar):
-        global frameRender
-        frameRender = invar
-
-    def errorSet(self, invar):
-        global findLineError
-        findLineError = invar
-
-    @staticmethod
-    def set_video_source(source):
-        Camera.video_source = source
+        HUE_1 = min(invarH + 15, 179)
+        HUE_2 = max(invarH - 15, 0)
+        SAT_1 = min(invarS + 150, 255)
+        SAT_2 = max(invarS - 150, 0)
+        VAL_1 = min(invarV + 150, 255)
+        VAL_2 = max(invarV - 150, 0)
+        
+        self.cv_thread.color_upper = np.array([HUE_1, SAT_1, VAL_1])
+        self.cv_thread.color_lower = np.array([HUE_2, SAT_2, VAL_2])
+        print(f"Nuevo rango de color configurado (LOWER): {self.cv_thread.color_lower}")
+        print(f"Nuevo rango de color configurado (UPPER): {self.cv_thread.color_upper}")
 
     @staticmethod
     def frames():
-        global ImgIsNone
-        camera = cv2.VideoCapture(Camera.video_source)
-        camera.release()
-        camera = cv2.VideoCapture(Camera.video_source)
-        if not camera.isOpened():
-            raise RuntimeError('Could not start camera.')
-
-        cvt = CVThread()
-        cvt.start()
+        try:
+            from picamera2 import Picamera2
+            print("Inicializando hardware de Picamera2...")
+            picam2 = Picamera2()
+            config = picam2.create_preview_configuration(main={"size": (640, 480)}) # Dejamos la config simple
+            picam2.configure(config)
+            picam2.start()
+            print("Picamera2 inicializada correctamente.")
+        except Exception as e:
+            print(f"Error al iniciar Picamera2: {e}")
+            error_img = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(error_img, "Camera Error", (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            while True:
+                yield cv2.imencode('.jpg', error_img)[1].tobytes()
+        
+        cam_instance = Camera.get_instance()
 
         while True:
-            # read current frame
-            _, img = camera.read()
-            if img is None:
-                if ImgIsNone == 0:
-                    print("--------------------")
-                    print("\033[31merror: Unable to read camera data.\033[0m")
-                    print("\033[33mIt may be that the Legacy camera is not turned on or the camera is not connected correctly.\033[0m")
-                    print("Open the Legacy camera: Enter in Raspberry Pi\033[34m'sudo raspi-config'\033[0m -->Select\033[34m'3 Interface Options'\033[0m -->\033[34m'I1 Legacy Camera'\033[0m.")
-                    print("Use the command: \033[34m'sudo killall python3'\033[0m. Close the self-starting program webServer.py")
-                    print("Use the command: \033[34m'raspistill -t 1000 -o image.jpg'\033[0m to check whether the camera can be used correctly.")
-                    print("Press the keyboard keys \033[34m'Ctrl + C'\033[0m multiple times to exit the current program.")
-                    print("--------Ctrl+C quit-----------")
-                    ImgIsNone = 1
-                continue
-
-            if Camera.modeSelect == 'none':
-                switch.switch(1,0)
-                cvt.pause()
-            else:
-                if cvt.CVThreading:
-                    pass
-                else:
-                    cvt.mode(Camera.modeSelect, img)
-                    cvt.resume()
-                try:
-                    img = cvt.elementDraw(img)
-                except:
-                    pass
+            # 1. Capturamos el fotograma (llega en formato RGB)
+            img_rgb = picam2.capture_array()
+            # 2. Forzamos la conversión de RGB a BGR, el formato que OpenCV usa
+            img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
             
-
-
-            # encode as a jpeg image and return it
-            if cv2.imencode('.jpg', img)[0]:
-                yield cv2.imencode('.jpg', img)[1].tobytes()
+            # El resto del código sigue igual
+            if cam_instance.modeSelect != 'none' and not cam_instance.cv_thread.is_processing:
+                cam_instance.cv_thread.set_mode(cam_instance.modeSelect, img)
+            
+            img = cam_instance.cv_thread.draw_elements_on_frame(img)
+            yield cv2.imencode('.jpg', img)[1].tobytes()

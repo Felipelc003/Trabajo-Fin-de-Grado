@@ -1,61 +1,57 @@
 #!/usr/bin/python3
-# File name   : Ultrasonic.py
+# File name   : ultra.py (Versión mejorada)
 # Description : Detection distance and tracking with ultrasonic
-# Website     : www.gewbot.com
+# Website     : www.adeept.com
 # Author      : William
 # Date        : 2019/02/23
+
 import RPi.GPIO as GPIO
 import time
 
+# --- Definición de Pines ---
 Tr = 11
 Ec = 8
 
+# --- Configuración Inicial (se hace una sola vez) ---
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(Tr, GPIO.OUT,initial=GPIO.LOW)
+GPIO.setup(Tr, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(Ec, GPIO.IN)
 
+print("Sensor ultrasónico inicializado.")
 
-def checkdist():       #Reading distance
-    for i in range(5):  # Remove invalid test results.
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(Tr, GPIO.OUT,initial=GPIO.LOW)
-        GPIO.setup(Ec, GPIO.IN)
-        GPIO.output(Tr, GPIO.LOW)
-        time.sleep(0.000002)
-        GPIO.output(Tr, GPIO.HIGH)
-        time.sleep(0.000015)
-        GPIO.output(Tr, GPIO.LOW)
-        while not GPIO.input(Ec):
-            pass
-        t1 = time.time()
-        while GPIO.input(Ec):
-            pass
-        t2 = time.time()
-        dist = (t2-t1)*340/2
-        if dist > 9 and i < 4:  # 5 consecutive times are invalid data, return the last test data
-            continue
-        else:
-            return (t2-t1)*340/2
+def checkdist():
+    """Lee la distancia una vez. La configuración ya está hecha."""
+    GPIO.output(Tr, GPIO.LOW)
+    time.sleep(0.000002) # Pequeña pausa para asegurar un pulso limpio
 
-# def checkdist():       #Reading distance
-#     GPIO.output(Tr, GPIO.HIGH)
-#     time.sleep(0.000015)
-#     GPIO.output(Tr, GPIO.LOW)
-#     while not GPIO.input(Ec):
-#         pass
-#     t1 = time.time()
-#     while GPIO.input(Ec):
-#         t3 = time.time()
-#         if ((t3-t1)*340/2)>=2:
-#             break
-#         pass
-#     t2 = time.time()
-#     return round((t2-t1)*340/2,2)
+    # Enviar el pulso de disparo
+    GPIO.output(Tr, GPIO.HIGH)
+    time.sleep(0.000015) # El pulso debe durar al menos 10µs
+    GPIO.output(Tr, GPIO.LOW)
 
+    # Medir el tiempo de la respuesta
+    while not GPIO.input(Ec):
+        pass
+    t1 = time.time()
+
+    while GPIO.input(Ec):
+        pass
+    t2 = time.time()
+
+    # Calcular la distancia en metros
+    distance = (t2 - t1) * 340 / 2
+    return distance
+
+# --- Bloque principal para pruebas ---
 if __name__ == '__main__':
-    while True:
-        distance = checkdist()*100
-        print("%.2f cm" %distance)
-        time.sleep(1)
+    try:
+        while True:
+            dist_m = checkdist()
+            dist_cm = dist_m * 100
+            print("Distancia: %.2f cm" % dist_cm)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nPrograma detenido por el usuario.")
+    finally:
+        GPIO.cleanup() # Limpia los pines GPIO al salir
