@@ -2,7 +2,6 @@
 # File name   : webServer.py
 # Description : Servidor principal para PiCar-B (Versión Final Definitiva)
 import os
-# Esta línea DEBE ser la primera. Le dice a gpiozero que use 'pigpio'.
 os.environ['GPIOZERO_PIN_FACTORY'] = 'pigpio'
 
 import time, threading, move, info, RPIservo, functions, robotLight, socket, asyncio, websockets, json, app
@@ -19,6 +18,7 @@ def servoPosInit():
     RPIservo.move(SERVO_STEERING, 90); RPIservo.move(SERVO_PAN, 90); RPIservo.move(SERVO_TILT, 90)
 
 def robotCtrl(command):
+    # ... (sin cambios)
     if RL:
         if 'forward' == command: RL.front_color('blue')
         elif 'left' == command: RL.front_turn_left()
@@ -29,8 +29,8 @@ def robotCtrl(command):
     if 'forward' == command: move.motor_left(1, 0, speed_set); move.motor_right(1, 0, speed_set)
     elif 'backward' == command: move.motor_left(1, 1, speed_set); move.motor_right(1, 1, speed_set)
     elif 'DS' in command: move.motorStop()
-    elif 'left' == command: RPIservo.move(SERVO_STEERING, 45)
-    elif 'right' == command: RPIservo.move(SERVO_STEERING, 135)
+    elif 'left' == command: RPIservo.move(SERVO_STEERING, 135)
+    elif 'right' == command: RPIservo.move(SERVO_STEERING, 45)
     elif 'TS' in command: RPIservo.move(SERVO_STEERING, 90)
     elif 'lookleft' == command: RPIservo.move(SERVO_PAN, 135)
     elif 'lookright' == command: RPIservo.move(SERVO_PAN, 45)
@@ -39,6 +39,7 @@ def robotCtrl(command):
     elif 'home' == command: servoPosInit()
 
 def wifi_check():
+    # ... (sin cambios)
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("1.1.1.1", 80)); s.close()
         print("CONEXION WIFI OK")
@@ -72,15 +73,13 @@ async def recv_msg(websocket):
                 servoPosInit()
                 fuc.trackLine()
 
+            elif command == 'automatic':
+                print("🤖 Activando modo 'Automático' con radar en vivo.")
+                fuc.automatic(websocket, asyncio.get_event_loop())
+
             elif command == 'pauseFunctions':
                 print("Pausando todas las funciones activas.")
                 fuc.pause()
-
-            # En la función recv_msg de webServer.py
-            elif command == 'automatic':
-                print("🤖 Activando modo 'Automático' con radar en vivo.")
-                # Le pasamos el websocket y el event loop al hilo de funciones
-                fuc.automatic(websocket, asyncio.get_event_loop())
 
             elif command == 'findColor':
                 print("🎥 Activando modo 'Buscar Color' en el stream de vídeo.")
@@ -97,17 +96,31 @@ async def recv_msg(websocket):
                 if flask_app:
                     flask_app.modeselect('none')
 
+            # ---- NUEVO BLOQUE PARA OBTENER INFORMACIÓN ----
+            elif command == 'get_info':
+                # No imprimimos nada para no llenar la consola del servidor
+                try:
+                    info_data = {
+                        'cpu_temp': info.get_cpu_tempfunc(),
+                        'cpu_use': info.get_cpu_use(),
+                        'ram_use': info.get_ram_info()[1] # get_ram_info() devuelve (total, used), queremos el segundo valor
+                    }
+                    response = {'title': 'info_update', 'data': info_data}
+                    await websocket.send(json.dumps(response))
+                except Exception as e:
+                    print(f"Error al obtener info del sistema: {e}")
+            # ---- FIN DEL NUEVO BLOQUE ----
+
             elif command in ['police','rainbow'] and RL:
                 getattr(RL, command)()
             
             elif command == 'Speed' and value:
                 speed_set = int(value)
                 move.set_speed(speed_set)
-
+            
             elif command == 'FCSET' and value:
                 print(f"🎨 Recibidos nuevos valores HSV: {value}")
                 try:
-                    # El valor llega como 'H S V', lo separamos y convertimos a entero
                     h, s, v = map(int, value.split())
                     if flask_app:
                         flask_app.colorFindSet(h, s, v)
