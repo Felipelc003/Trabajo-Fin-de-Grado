@@ -22,16 +22,15 @@ import numpy as np
 DS_stu, TS_stu, color_bg, color_text, color_btn, color_line, color_can, color_oval, target_color = (0,)*9
 speed, ip_stu, Switch_3, Switch_2, Switch_1, servo_stu, function_stu = (0,)*7
 function_button_active = None 
+steering_state, camera_pan_state, camera_tilt_state = 'center', 'stop', 'stop'
 
-# --- Variables de estado para el modo interruptor ---
-steering_state = 'center'
-camera_pan_state = 'stop'
-camera_tilt_state = 'stop'
+# --- NUEVAS VARIABLES DE TKINTER PARA LOS DATOS ---
+cpu_temp_var, cpu_use_var, ram_use_var = None, None, None
 
 def global_init():
     global DS_stu, TS_stu, color_bg, color_text, color_btn, color_line, color_can, color_oval, target_color
     global speed, ip_stu, Switch_3, Switch_2, Switch_1, servo_stu, function_stu
-    DS_stu=0; TS_stu=0; color_bg='#000000'; color_text='#E1F5FE'; color_btn='#0277BD'; color_line='#01579B'
+    DS_stu=0; TS_stu=0; color_bg='#000000'; color_text='#E1F5FE'; color_btn='#0277BD'; line_color='#01579B'
     color_can='#212121'; color_oval='#2196F3'; target_color='#FF6D00'; speed=1; ip_stu=1
     Switch_3=0; Switch_2=0; Switch_1=0; servo_stu=0; function_stu=0
 
@@ -66,6 +65,12 @@ def show_video_stream(ip_address):
     cap.release()
     cv2.destroyAllWindows()
 
+# --- NUEVA FUNCIÓN PARA PEDIR DATOS PERIÓDICAMENTE ---
+def request_system_info():
+    if websocket: # Solo pide si estamos conectados
+        send_command('get_info')
+        root.after(2000, request_system_info) # Llama a esta misma función otra vez en 2 segundos
+
 async def network_loop(ip_address, port):
     global websocket, event_loop, ip_stu
     event_loop = asyncio.get_running_loop()
@@ -81,6 +86,9 @@ async def network_loop(ip_address, port):
             video_thread.start()
             
             await websocket.send("admin:123456")
+
+            # --- Iniciar el bucle de petición de información ---
+            request_system_info()
             
             while True:
                 message = await websocket.recv()
@@ -88,8 +96,15 @@ async def network_loop(ip_address, port):
                     data = json.loads(message)
                     if data.get('title') == 'scanResult':
                         scan_results = data.get('data', [])
-                        print(f"Datos de radar recibidos: {scan_results}")
                         draw_radar_scan(scan_results)
+                    
+                    # --- NUEVO BLOQUE PARA ACTUALIZAR LA INFO ---
+                    elif data.get('title') == 'info_update':
+                        info = data.get('data', {})
+                        cpu_temp_var.set(f"{info.get('cpu_temp', 'N/A')} ℃")
+                        cpu_use_var.set(f"{info.get('cpu_use', 'N/A')} %")
+                        ram_use_var.set(f"{info.get('ram_use', 'N/A')} %")
+
                 except (json.JSONDecodeError, TypeError):
                     print(f"Mensaje del servidor (no JSON): {message}")
                 except Exception as e:
@@ -100,6 +115,7 @@ async def network_loop(ip_address, port):
     finally:
         websocket = None; ip_stu = 1; l_ip_4.config(text='Disconnected', bg='#F44336')
         E1.config(state='normal'); Btn14.config(state='normal')
+        cpu_temp_var.set("N/A"); cpu_use_var.set("N/A"); ram_use_var.set("N/A")
         print("Cerrando ventana de vídeo si está abierta...")
 
 def start_network_thread():
@@ -265,7 +281,7 @@ def update_color_swatch(event=None):
 
 # --- Creación de la Interfaz Gráfica ---
 def loop():
-    global root, var_Speed, var_R_L, var_G_L, var_B_L, var_0, var_1, var_2, var_lip1, var_lip2, var_err, var_R, var_G, var_B, var_ec, Btn_Switch_1, Btn_Switch_2, Btn_Switch_3, E1, Btn14, l_ip_4, l_ip_5, Btn_function_2, Btn_function_3, Btn_function_4, Btn_function_5, canvas_show
+    global root, cpu_temp_var, cpu_use_var, ram_use_var, var_Speed, var_R_L, var_G_L, var_B_L, var_0, var_1, var_2, var_lip1, var_lip2, var_err, var_R, var_G, var_B, var_ec, Btn_Switch_1, Btn_Switch_2, Btn_Switch_3, E1, Btn14, l_ip_4, l_ip_5, Btn_function_2, Btn_function_3, Btn_function_4, Btn_function_5, canvas_show
     root = tk.Tk(); root.title('PiCar-B v2.0 GUI'); root.geometry('565x850'); root.config(bg=color_bg)
     var_Speed=tk.StringVar(); var_Speed.set(100); var_R_L=tk.StringVar(); var_R_L.set(0); var_G_L=tk.StringVar(); var_G_L.set(0); var_B_L=tk.StringVar(); var_B_L.set(0)
     var_R=tk.StringVar(); var_R.set(80); var_G=tk.StringVar(); var_G.set(80); var_B=tk.StringVar(); var_B.set(80); var_0=tk.StringVar(); var_0.set(300)
@@ -274,8 +290,11 @@ def loop():
     try:
         logo=tk.PhotoImage(file='logo.png'); tk.Label(root,image=logo,bg=color_bg).place(x=30,y=13)
     except: pass
-    motor_buttons(30,105); information_screen(330,15); connent_input(125,15); switch_button(30,195); servo_buttons(255,195); scale(30,230,203)
-    scale_RGB(370,280,172); scale_PWM(370,400,172); ultrasonic_radar(30,290); function_buttons(480,15); scale_FL(30,550,320)
+    cpu_temp_var = tk.StringVar(value="N/A")
+    cpu_use_var = tk.StringVar(value="N/A")
+    ram_use_var = tk.StringVar(value="N/A")
+    motor_buttons(30,105); information_screen(380,15); connent_input(125,15); switch_button(30,195); servo_buttons(255,195); scale(30,230,203)
+    scale_RGB(370,280,172); scale_PWM(370,400,172); ultrasonic_radar(30,290); function_buttons(550,15); scale_FL(30,550,320)
     scale_FC(30,650,320); scale_ExpCom(30,770,320)
     root.mainloop()
 
@@ -286,7 +305,7 @@ def motor_buttons(x,y):
     btn_motor_fwd.bind('<ButtonPress-1>', call_forward); btn_motor_fwd.bind('<ButtonRelease-1>', call_DS)
     root.bind('<KeyPress-w>', call_forward); root.bind('<KeyRelease-w>', call_DS)
     motor_controls.append(btn_motor_fwd)
-    btn_motor_bwd = tk.Button(root, width=8, text='Backward',fg=color_text,bg=color_btn,relief='ridge'); btn_motor_bwd.place(x=x+70,y=y+35)
+    btn_motor_bwd = tk.Button(root, width=10, text='Backward',fg=color_text,bg=color_btn,relief='ridge'); btn_motor_bwd.place(x=x+70,y=y+35)
     btn_motor_bwd.bind('<ButtonPress-1>', call_backward); btn_motor_bwd.bind('<ButtonRelease-1>', call_DS)
     root.bind('<KeyPress-s>', call_backward); root.bind('<KeyRelease-s>', call_DS)
     motor_controls.append(btn_motor_bwd)
@@ -329,8 +348,18 @@ def servo_buttons(x,y):
     root.bind('<KeyPress-h>', call_home)
     
 def information_screen(x,y):
-	global l_ip_4, l_ip_5; tk.Label(root,width=18,text='CPU Temp:',fg=color_text,bg='#212121').place(x=x,y=y); tk.Label(root,width=18,text='CPU Usage:',fg=color_text,bg='#212121').place(x=x,y=y+30)
-	tk.Label(root,width=18,text='RAM Usage:',fg=color_text,bg='#212121').place(x=x,y=y+60); l_ip_4=tk.Label(root,width=18,text='Disconnected',fg=color_text,bg='#F44336'); l_ip_4.place(x=x,y=y+95)
+	global l_ip_4, l_ip_5
+    # Etiquetas fijas (los títulos)
+	tk.Label(root,width=10,text='CPU Temp:',fg=color_text,bg=color_bg, anchor='w').place(x=x,y=y)
+	tk.Label(root,width=10,text='CPU Usage:',fg=color_text,bg=color_bg, anchor='w').place(x=x,y=y+30)
+	tk.Label(root,width=10,text='RAM Usage:',fg=color_text,bg=color_bg, anchor='w').place(x=x,y=y+60)
+
+    # Etiquetas dinámicas (los valores) que se actualizan solas
+	tk.Label(root,width=8,textvariable=cpu_temp_var,fg=color_text,bg=color_bg, anchor='w').place(x=x+80,y=y)
+	tk.Label(root,width=8,textvariable=cpu_use_var,fg=color_text,bg=color_bg, anchor='w').place(x=x+80,y=y+30)
+	tk.Label(root,width=8,textvariable=ram_use_var,fg=color_text,bg=color_bg, anchor='w').place(x=x+80,y=y+60)
+
+	l_ip_4=tk.Label(root,width=18,text='Disconnected',fg=color_text,bg='#F44336'); l_ip_4.place(x=x,y=y+95)
 	l_ip_5=tk.Label(root,width=18,text='<No IP>',fg=color_text,bg=color_btn); l_ip_5.place(x=x,y=y+130)
 def connent_input(x,y):
 	global E1, Btn14; E1 = tk.Entry(root,show=None,width=16,bg="#37474F",fg='#eceff1'); E1.place(x=x+5,y=y+25); tk.Label(root,width=10,text='IP Address:',fg=color_text,bg='#000000').place(x=x,y=y)
