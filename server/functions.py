@@ -77,7 +77,7 @@ class Functions(threading.Thread):
             RPIservo.move(SERVO_PAN, angle)
             time.sleep(0.05)
             dist = ultra.checkdist()
-            if dist < 5:
+            if 0.02 < dist < 4.0:
                 full_scan_result.append([dist, angle])
 
         time.sleep(0.5)
