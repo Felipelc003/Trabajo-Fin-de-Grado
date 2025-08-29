@@ -116,7 +116,7 @@ async def recv_msg(websocket):
             
             elif command == 'Speed' and value:
                 speed_set = int(value)
-                move.set_speed(speed_set)
+                move.speed_set(speed_set)
             
             elif command == 'FCSET' and value:
                 print(f"🎨 Recibidos nuevos valores HSV: {value}")

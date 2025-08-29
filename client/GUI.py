@@ -337,8 +337,12 @@ def servo_buttons(x,y):
     btn_servo_right.bind('<ButtonPress-1>', call_lookright)
     root.bind('<KeyPress-l>', call_lookright)
     servo_controls.append(btn_servo_right)
-    Btn_3 = tk.Button(root, width=8, text='SpeechR',fg=color_text,bg=color_btn,relief='ridge'); Btn_3.place(x=x+140,y=y)
-    Btn_3.bind('<ButtonPress-1>', call_sr); root.bind('<KeyPress-o>', call_sr) 
+    
+    btn_center = tk.Button(root, width=8, text='Center',fg=color_text,bg=color_btn,relief='ridge')
+    btn_center.place(x=x+140,y=y)
+    btn_center.bind('<ButtonPress-1>', call_home) # Llama a la función de centrado
+
+     
     Btn_SR = tk.Button(root, width=8, text='CV Run',fg=color_text,bg=color_btn,relief='ridge'); Btn_SR.place(x=x,y=y)
     Btn_SR.bind('<ButtonPress-1>', call_CVrun); root.bind('<KeyPress-u>', call_CVrun) 
     Btn_Police = tk.Button(root, width=8, text='Police',fg=color_text,bg=color_btn,relief='ridge'); Btn_Police.place(x=x,y=y-55)
