@@ -1,4 +1,4 @@
-#!/home/felipe/adeept_picar-b/venv/bin/python3
+#!/home/felipe/Adeept_PiCar-B/venv/bin/python3
 import sys
 from pybase64.__main__ import main
 if __name__ == '__main__':

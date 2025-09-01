@@ -133,8 +133,8 @@ class Functions(threading.Thread):
 
             if dist_cm > DISTANCIA_SEGURA_AVANCE:
                 RPIservo.move(SERVO_STEERING, 90) # Dirección recta
-                move.motor_left(1, 0, VELOCIDAD)
-                move.motor_right(1, 0, VELOCIDAD)
+                move.motor(1, 0, VELOCIDAD)
+                #move.motor_right(1, 0, VELOCIDAD)
             else:
                 print("Obstáculo detectado. Cambiando a estado DECIDIR_RUTA.")
                 move.motorStop()
@@ -176,8 +176,8 @@ class Functions(threading.Thread):
                 RPIservo.move(SERVO_STEERING, 135) # Girar ruedas a la derecha
             
             # ¡Ahora avanzamos con las ruedas giradas!
-            move.motor_left(1, 0, VELOCIDAD)
-            move.motor_right(1, 0, VELOCIDAD)
+            move.motor(1, 0, VELOCIDAD)
+            #move.motor_right(1, 0, VELOCIDAD)
             time.sleep(0.8) # Tiempo para que el giro sea efectivo
             self.auto_state = "AVANZAR" # Volvemos a evaluar el camino
 
@@ -185,14 +185,14 @@ class Functions(threading.Thread):
         elif self.auto_state == "MANIOBRA_ESCAPE":
             print("Estado: MANIOBRA_ESCAPE")
             # Primero, marcha atrás en línea recta para ganar espacio
-            move.motor_left(1, 1, VELOCIDAD)
-            move.motor_right(1, 1, VELOCIDAD)
+            move.motor(1, 1, VELOCIDAD)
+            #move.motor_right(1, 1, VELOCIDAD)
             time.sleep(1)
 
             # Luego, pivota sobre sí mismo para cambiar de dirección
             RPIservo.move(SERVO_STEERING, 45) # Ruedas a la izquierda
-            move.motor_left(1, 1, VELOCIDAD) # Rueda izquierda atrás
-            move.motor_right(1, 0, VELOCIDAD) # Rueda derecha adelante
+            move.motor(1, 1, VELOCIDAD) # Rueda izquierda atrás
+            #move.motor_right(1, 0, VELOCIDAD) # Rueda derecha adelante
             time.sleep(0.8) # Tiempo de pivote
             self.auto_state = "AVANZAR" # Volvemos a evaluar el camino
 
@@ -204,13 +204,13 @@ class Functions(threading.Thread):
 
         if status_middle == 0:
             RPIservo.move(SERVO_STEERING, 90)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
         elif status_left == 0:
             RPIservo.move(SERVO_STEERING, 45)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
         elif status_right == 0:
             RPIservo.move(SERVO_STEERING, 135)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
         else:
             move.motorStop()
         time.sleep(0.1)
