@@ -1,204 +1,170 @@
 #!/usr/bin/python3
-# File name   : setup.py
-# Author      : Adeept
-# Date        : 2020/3/14
+# ============================================================================
+# Script de Instalación Completa para Adeept PiCar-B
+# Adaptado para Raspberry Pi OS Bookworm (64-bit)
+# fecha: 9/8/2025 20:43
+# Ejecución:
+# 1. Guarda este fichero como 'setup.py' en tu directorio de proyecto.
+# 2. Dale permisos de ejecución: chmod +x setup.py
+# 3. Ejecútalo con sudo: sudo ./setup.py
+# ============================================================================
 
 import os
+import sys
 import time
 
-curpath = os.path.realpath(__file__)
-thisPath = "/" + os.path.dirname(curpath)
+def run_cmd(cmd, check_error=True):
+    """Ejecuta un comando en el shell."""
+    print(f"--- Ejecutando: {cmd} ---")
+    status = os.system(cmd)
+    if check_error and status != 0:
+        print(f"\n[ERROR FATAL] El comando falló con código de salida {status}.")
+        print("El script se detendrá. Revisa el error de arriba.")
+        sys.exit(1)
+    return status
 
-def replace_num(file,initial,new_num):  
-    newline=""
-    str_num=str(new_num)
-    with open(file,"r") as f:
-        for line in f.readlines():
-            if(line.find(initial) == 0):
-                line = (str_num+'\n')
-            newline += line
-    with open(file,"w") as f:
-        f.writelines(newline)
+def main():
+    """Función principal del script de instalación."""
+    # --- 0. VERIFICACIÓN INICIAL ---
+    if os.geteuid() != 0:
+        print("[ERROR] Este script debe ser ejecutado con privilegios de superusuario.")
+        print("Por favor, ejecútalo usando 'sudo'. Ejemplo: sudo python3 setup.py")
+        sys.exit(1)
 
-for x in range(1,4):
-	if os.system("sudo apt-get update") == 0:
-		break
+    print("=== INICIANDO LA CONFIGURACIÓN DEL PICAR-B PARA BOOKWORM (64-BIT) ===")
+    time.sleep(2)
 
-os.system("sudo apt-get purge -y wolfram-engine")
-os.system("sudo apt-get purge -y libreoffice*")
-os.system("sudo apt-get -y clean")
-os.system("sudo apt-get -y autoremove")
+    # --- 1. LIMPIEZA DE PAQUETES CONFLICTIVOS ---
+    print("\n=== PASO 1: Limpiando paquetes potencialmente conflictivos ===")
+    # Usamos '|| true' para que el script no falle si los paquetes no existen
+    run_cmd("sudo apt-get remove --purge -y python3-opencv python3-numpy || true", check_error=False)
+    run_cmd("sudo apt-get autoremove -y", check_error=False)
+    run_cmd("sudo pip3 uninstall -y --break-system-packages numpy opencv-contrib-python opencv-python || true", check_error=False)
+    
+    # --- 2. ACTUALIZACIÓN DEL SISTEMA ---
+    print("\n=== PASO 2: Actualizando el sistema operativo ===")
+    run_cmd("sudo apt-get update")
+    run_cmd("sudo apt-get -y upgrade")
+    run_cmd("sudo apt-get purge -y wolfram-engine libreoffice*")
+    run_cmd("sudo apt-get -y clean")
 
-# for x in range(1,4):
-# 	if os.system("sudo apt-get -y upgrade") == 0:
-# 		break
+    # --- 3. INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA (APT) ---
+    print("\n=== PASO 3: Instalando dependencias base del sistema ===")
+    sys_packages = [
+        "python3-dev", "python3-pip", "libfreetype6-dev", "libjpeg-dev", 
+        "build-essential", "swig", "portaudio19-dev", "python3-all-dev", 
+        "python3-pyaudio", "flac", "i2c-tools", "python3-smbus",
+        "libatlas-base-dev", "libhdf5-dev", 
+        "libqt5gui5", "libqt5test5", "libopenblas-dev", "liblapack-dev", 
+        "libcap-dev", "libcamera-dev", "libcamera-apps"
+    ]
+    run_cmd("sudo apt-get install -y " + " ".join(sys_packages))
 
-for x in range(1,4):
-	if os.system("sudo pip3 install -U pip") == 0:
-		break
+    # --- 4. INSTALACIÓN DE LIBRERÍAS DE PYTHON (PIP) ---
+    print("\n=== PASO 4: Instalando librerías de Python ===")
+    py_packages = [
+        "pip", "setuptools", "wheel", "luma.oled", "adafruit-pca9685", 
+        "rpi_ws281x", "mpu6050-raspberrypi", "flask", "flask-cors", 
+        "websockets", "imutils", "pybase64", "psutil", "SpeechRecognition", 
+        "pyaudio", "numpy", "opencv-contrib-python", "pyzmq", "picamera2", "simplejpeg"
+    ]
+    run_cmd("sudo pip3 install --break-system-packages --upgrade " + " ".join(py_packages))
+    
+    # --- 5. CONFIGURACIÓN DE HARDWARE (I2C, CÁMARA) ---
+    print("\n=== PASO 5: Configurando interfaces de hardware (I2C y Cámara) ===")
+    boot_config_path = "/boot/firmware/config.txt"
+    config_changes = {
+        'dtparam=i2c_arm=on': '#dtparam=i2c_arm=on',
+        'start_x=1': '#start_x=1',
+        'camera_auto_detect=0': 'camera_auto_detect=1',
+        'dtoverlay=vc4-kms-v3d': '#dtoverlay=vc4-kms-v3d',
+        'dtoverlay=ov5647': '#dtoverlay=ov5647' # Para la cámara v1.3 del kit
+    }
+    
+    try:
+        with open(boot_config_path, 'r') as f:
+            lines = f.readlines()
+        
+        with open(boot_config_path, 'w') as f:
+            for line in lines:
+                found = False
+                for key, comment in config_changes.items():
+                    if key in line or comment in line:
+                        f.write(key + '\n')
+                        config_changes.pop(key)
+                        found = True
+                        break
+                if not found:
+                    f.write(line)
+            
+            # Añadir las configuraciones que no se encontraron
+            for key in config_changes:
+                f.write(key + '\n')
+        print(f"[OK] Fichero '{boot_config_path}' actualizado.")
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python-dev python-pip libfreetype6-dev libjpeg-dev build-essential") == 0:
-		break
+    except Exception as e:
+        print(f"[ERROR] No se pudo editar '{boot_config_path}': {e}")
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y swig") == 0:
-		break
+    # --- 6. CONFIGURACIÓN DEL PUNTO DE ACCESO (AP) ---
+    print("\n=== PASO 6: Configurando el modo de Punto de Acceso (create_ap) ===")
+    if not os.path.exists("/home/pi/create_ap"):
+        run_cmd("git clone https://github.com/oblique/create_ap /home/pi/create_ap")
+        run_cmd("cd /home/pi/create_ap && sudo make install")
+    run_cmd("sudo apt-get install -y util-linux procps hostapd iproute2 iw haveged dnsmasq")
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y portaudio19-dev python3-all-dev python3-pyaudio") == 0:
-		break
+    # --- 7. CONFIGURACIÓN DE AUTOINICIO (SYSTEMD) ---
+    print("\n=== PASO 7: Creando servicio de autoinicio (systemd) ===")
+    # Asume que el script a ejecutar es 'webServer.py' y está en 'server/'
+    # La ruta de trabajo será la carpeta que contiene la carpeta 'server'
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    
+    service_content = f"""[Unit]
+Description=PiCar-B Auto Start Service
+After=network.target
 
-for x in range(1,4):
-	if os.system("sudo pip3 install pyaudio") == 0:
-		break
+[Service]
+ExecStart=/usr/bin/python3 {project_root}/server/webServer.py
+WorkingDirectory={project_root}
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+User=pi
+Group=pi
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y flac") == 0:
-		break
+[Install]
+WantedBy=multi-user.target
+"""
+    service_path = "/etc/systemd/system/picarb.service"
+    try:
+        with open(service_path, "w") as f:
+            f.write(service_content)
+        print(f"[OK] Fichero de servicio creado en '{service_path}'")
+    except Exception as e:
+        print(f"[ERROR] No se pudo crear el fichero de servicio: {e}")
+        sys.exit(1)
+        
+    run_cmd("sudo systemctl daemon-reload")
+    run_cmd("sudo systemctl enable picarb.service")
+    
+    # --- 8. PASOS FINALES ---
+    print("\n=== PASO 8: Finalizando la instalación ===")
+    run_cmd("echo 'blacklist snd_bcm2835' | sudo tee /etc/modprobe.d/snd-blacklist.conf > /dev/null")
+    print("[OK] Audio integrado deshabilitado para evitar conflictos.")
 
-for x in range(1,4):
-	if os.system("sudo wget https://sourceforge.net/projects/cmusphinx/files/sphinxbase/5prealpha/sphinxbase-5prealpha.tar.gz/download -O sphinxbase.tar.gz") == 0:
-		break
+    print("\n" + "="*50)
+    print("      ✅ ¡INSTALACIÓN COMPLETADA CON ÉXITO! ✅")
+    print("="*50)
+    print("\nEl servicio 'picarb.service' se iniciará automáticamente en el próximo arranque.")
+    print("Es **muy importante** reiniciar el sistema ahora para que todos los")
+    print("cambios, especialmente los de hardware, surtan efecto.")
+    
+    reboot_choice = input("\n¿Deseas reiniciar ahora? (s/N): ")
+    if reboot_choice.lower() == 's':
+        print("Reiniciando en 5 segundos...")
+        time.sleep(5)
+        os.system("sudo reboot")
+    else:
+        print("\n[AVISO] Recuerda reiniciar manualmente con 'sudo reboot'.")
 
-for x in range(1,4):
-	if os.system("sudo wget https://sourceforge.net/projects/cmusphinx/files/pocketsphinx/5prealpha/pocketsphinx-5prealpha.tar.gz/download -O pocketsphinx.tar.gz") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo tar -xzvf sphinxbase.tar.gz") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo tar -xzvf pocketsphinx.tar.gz") == 0:
-		break
-
-try:
-	os.system("cd sphinxbase-5prealpha/ && ./configure -enable-fixed && make && sudo make install")
-	os.system("sudo pip3 install pocketsphinx")
-except:
-	pass
-
-try:
-	os.system("cd pocketsphinx-5prealpha/ && ./configure && make && sudo make install")
-	os.system("sudo pip3 install SpeechRecognition")
-except:
-	pass
-
-try:
-	os.system("sudo pip3 install pocketsphinx")
-except:
-	pass
-
-try:
-	os.system("sudo pip3 install SpeechRecognition")
-except:
-	pass
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y bison libasound2-dev swig") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo -H pip3 install --upgrade luma.oled") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y i2c-tools") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install adafruit-pca9685") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install rpi_ws281x") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python3-smbus") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install mpu6050-raspberrypi") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install flask_cors") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install websockets") == 0:
-		break
-
-try:
-	replace_num("/boot/config.txt",'#dtparam=i2c_arm=on','dtparam=i2c_arm=on\nstart_x=1\n')
-except:
-	print('try again')
-
-
-for x in range(1,4):
-	if os.system("sudo pip3 install numpy") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install opencv-contrib-python==3.4.3.18") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo apt-get -y install libqtgui4 libhdf5-dev libhdf5-serial-dev libatlas-base-dev libjasper-dev libqt4-test") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install imutils zmq pybase64 psutil") == 0:   ####
-		break
-
-for x in range(1,4):
-	if os.system("sudo git clone https://github.com/oblique/create_ap") == 0:
-		break
-
-try:
-	os.system("cd " + thisPath + "/create_ap && sudo make install")
-except:
-	pass
-
-try:
-	os.system("cd //home/pi/create_ap && sudo make install")
-except:
-	pass
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y util-linux procps hostapd iproute2 iw haveged dnsmasq") == 0:
-		break
-
-try:
-	os.system('sudo touch //home/pi/startup.sh')
-	with open("//home/pi/startup.sh",'w') as file_to_write:
-		#you can choose how to control the robot
-		file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/webServer.py")
-# 		file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/server.py")
-except:
-	pass
-
-os.system('sudo chmod 777 //home/pi/startup.sh')
-
-replace_num('/etc/rc.local','fi','fi\n//home/pi/startup.sh start')
-
-try: #fix conflict with onboard Raspberry Pi audio
-	os.system('sudo touch /etc/modprobe.d/snd-blacklist.conf')
-	with open("/etc/modprobe.d/snd-blacklist.conf",'w') as file_to_write:
-		file_to_write.write("blacklist snd_bcm2835")
-except:
-	pass
-
-print('The program in Raspberry Pi has been installed, disconnected and restarted. \nYou can now power off the Raspberry Pi to install the camera and driver board (Robot HAT). \nAfter turning on again, the Raspberry Pi will automatically run the program to set the servos port signal to turn the servos to the middle position, which is convenient for mechanical assembly.')
-print('restarting...')
-os.system("sudo reboot")
+if __name__ == "__main__":
+    main()
