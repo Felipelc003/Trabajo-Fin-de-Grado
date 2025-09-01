@@ -197,36 +197,49 @@ class Functions(threading.Thread):
             self.auto_state = "AVANZAR" # Volvemos a evaluar el camino
 
     def trackLineProcessing(self):
-        # ... (esta función no ha cambiado)
+        """
+        Lógica de seguimiento de línea ADAPTADA para un solo motor de propulsión
+        y un servo de dirección (Hardware PiCar-B).
+        """
+        VELOCIDAD = 70 # Puedes ajustar esta velocidad
+
+        # --- LECTURA DE SENSORES ---
         status_right = GPIO.input(line_pin_right)
         status_middle = GPIO.input(line_pin_middle)
         status_left = GPIO.input(line_pin_left)
+        
+        # Recordatorio: 1 = Línea Negra, 0 = Superficie Blanca
+        line_status = (status_left, status_middle, status_right)
+        
+        # --- LÓGICA DE DECISIÓN ---
+        
+        # Caso 1: Línea en el centro (0, 1, 0) -> Ruedas rectas y motor adelante
+        if line_status == (0, 1, 0):
+            RPIservo.move(SERVO_STEERING, 90)  # Dirección recta
+            move.motor(1, 0, VELOCIDAD)
+            self.last_turn_direction = 'none'
 
-        if status_middle == 0:
-            RPIservo.move(SERVO_STEERING, 90)
-            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
-        elif status_left == 0:
-            RPIservo.move(SERVO_STEERING, 45)
-            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
-        elif status_right == 0:
-            RPIservo.move(SERVO_STEERING, 135)
-            move.motor(1, 0, 80); #move.motor_right(1, 0, 80)
-        else:
+        # Caso 2: Se desvía a la derecha (1, 1, 0) o (1, 0, 0) -> Girar ruedas a la izquierda y avanzar
+        elif line_status in [(1, 1, 0), (1, 0, 0)]:
+            RPIservo.move(SERVO_STEERING, 45)  # Girar ruedas a la izquierda
+            move.motor(1, 0, VELOCIDAD)
+            self.last_turn_direction = 'left'
+
+        # Caso 3: Se desvía a la izquierda (0, 1, 1) o (0, 0, 1) -> Girar ruedas a la derecha y avanzar
+        elif line_status in [(0, 1, 1), (0, 0, 1)]:
+            RPIservo.move(SERVO_STEERING, 135) # Girar ruedas a la derecha
+            move.motor(1, 0, VELOCIDAD)
+            self.last_turn_direction = 'right'
+
+        # Caso 4: Línea perdida (0, 0, 0) -> Detener motor y girar ruedas para buscar
+        elif line_status == (0, 0, 0):
+            move.motorStop() # Detiene el avance
+            # Gira las ruedas en la última dirección para buscar la línea
+            if self.last_turn_direction == 'left':
+                RPIservo.move(SERVO_STEERING, 45)
+            elif self.last_turn_direction == 'right':
+                RPIservo.move(SERVO_STEERING, 135)
+        
+        # Caso 5: Cruce o final (1, 1, 1) -> Parar completamente
+        else: 
             move.motorStop()
-        time.sleep(0.1)
-
-    def functionGoing(self):
-        if self.functionMode == 'none':
-            # No hacemos nada, la pausa se encarga de detener motores
-            pass
-        elif self.functionMode == 'Automatic':
-            self.automaticProcessing()
-        elif self.functionMode == 'trackLine':
-            self.trackLineProcessing()
-    
-    def run(self):
-        while True:
-            self.__flag.wait()
-            # Este bucle solo se ejecuta si __flag está activo (no en pausa)
-            if self.functionMode != 'none':
-                self.functionGoing()
