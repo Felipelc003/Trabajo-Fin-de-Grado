@@ -1,4 +1,3 @@
-felipe@raspberrypi:~/adeept_picar-b $ cat server/camera_opencv.py 
 # camera_opencv.py (VERSIÓN CON CORRECCIÓN DE COLOR FORZADA Y DEFINITIVA)
 import os
 import cv2
