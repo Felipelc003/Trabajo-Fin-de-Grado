@@ -26,8 +26,8 @@ def robotCtrl(command):
         elif 'DS' in command or 'TS' in  command: RL.front_color('cian')
         elif 'backward' == command: RL.front_color('yellow')
     
-    if 'forward' == command: move.motor_left(1, 0, speed_set); move.motor_right(1, 0, speed_set)
-    elif 'backward' == command: move.motor_left(1, 1, speed_set); move.motor_right(1, 1, speed_set)
+    if 'forward' == command: move.motor(1, 0, speed_set);
+    elif 'backward' == command: move.motor(1, 1, speed_set);
     elif 'DS' in command: move.motorStop()
     elif 'left' == command: RPIservo.move(SERVO_STEERING, 135)
     elif 'right' == command: RPIservo.move(SERVO_STEERING, 45)

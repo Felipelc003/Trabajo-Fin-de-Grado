@@ -59,7 +59,7 @@ def setup():#Motor initialization
 		pass
 
 
-def motor_left(status, direction, speed):#Motor 2 positive and negative rotation
+def motor(status, direction, speed):#Motor 2 positive and negative rotation
 	if status == 0: # stop
 		GPIO.output(Motor_B_Pin1, GPIO.LOW)
 		GPIO.output(Motor_B_Pin2, GPIO.LOW)
@@ -76,7 +76,7 @@ def motor_left(status, direction, speed):#Motor 2 positive and negative rotation
 			pwm_B.start(0)
 			pwm_B.ChangeDutyCycle(speed)
 
-
+"""""
 def motor_right(status, direction, speed):#Motor 1 positive and negative rotation
 	if status == 0: # stop
 		GPIO.output(Motor_A_Pin1, GPIO.LOW)
@@ -94,37 +94,29 @@ def motor_right(status, direction, speed):#Motor 1 positive and negative rotatio
 			pwm_A.start(0)
 			pwm_A.ChangeDutyCycle(speed)
 	return direction
-
+"""
 
 def move(speed, direction, turn, radius=0.6):   # 0 < radius <= 1  
 	#speed = 100
 	if direction == 'forward':
 		if turn == 'right':
-			motor_left(0, left_backward, int(speed*radius))
-			motor_right(1, right_forward, speed)
+			motor(0, left_backward, int(speed*radius))
 		elif turn == 'left':
-			motor_left(1, left_forward, speed)
-			motor_right(0, right_backward, int(speed*radius))
+			motor(1, left_forward, speed)
 		else:
-			motor_left(1, left_forward, speed)
-			motor_right(1, right_forward, speed)
+			motor(1, left_forward, speed)
 	elif direction == 'backward':
 		if turn == 'right':
-			motor_left(0, left_forward, int(speed*radius))
-			motor_right(1, right_backward, speed)
+			motor(0, left_forward, int(speed*radius))
 		elif turn == 'left':
-			motor_left(1, left_backward, speed)
-			motor_right(0, right_forward, int(speed*radius))
+			motor(1, left_backward, speed)
 		else:
-			motor_left(1, left_backward, speed)
-			motor_right(1, right_backward, speed)
+			motor(1, left_backward, speed)
 	elif direction == 'no':
 		if turn == 'right':
-			motor_left(1, left_backward, speed)
-			motor_right(1, right_forward, speed)
+			motor(1, left_backward, speed)
 		elif turn == 'left':
-			motor_left(1, left_forward, speed)
-			motor_right(1, right_backward, speed)
+			motor(1, left_forward, speed)
 		else:
 			motorStop()
 	else:

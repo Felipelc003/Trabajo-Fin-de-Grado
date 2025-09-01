@@ -117,20 +117,19 @@ class Functions(threading.Thread):
 
         if dist * 100 > 40: # Si hay más de 40 cm, avanza
             RPIservo.move(SERVO_STEERING, 90)
-            move.motor_left(1, 0, 80)
-            move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80)
         elif dist * 100 > 20: # Si está entre 20 y 40 cm, decide a dónde girar
             move.motorStop()
             
             # 2. Mirar a la izquierda y medir
-            left_angle = 160
+            left_angle = 135
             RPIservo.move(SERVO_PAN, left_angle)
             time.sleep(0.3)
             dist_left = ultra.checkdist()
             self.send_radar_data(dist_left, left_angle) # Enviamos el dato
             
             # 3. Mirar a la derecha y medir
-            right_angle = 20
+            right_angle = 45
             RPIservo.move(SERVO_PAN, right_angle)
             time.sleep(0.3)
             dist_right = ultra.checkdist()
@@ -141,36 +140,32 @@ class Functions(threading.Thread):
             if dist_left > dist_right:
                 print("Decisión: Girar a la izquierda")
                 RPIservo.move(SERVO_STEERING, 45)
-                move.motor_left(1, 1, 80)
-                move.motor_right(1, 0, 80)
+                move.motor(1, 1, 80)
             else:
                 print("Decisión: Girar a la derecha")
                 RPIservo.move(SERVO_STEERING, 135)
-                move.motor_left(1, 0, 80)
-                move.motor_right(1, 1, 80)
+                move.motor(1, 0, 80)
             time.sleep(0.5)
         else: # Si está a menos de 20 cm, marcha atrás
             print("Decisión: Marcha atrás")
-            move.motor_left(1, 1, 80)
-            move.motor_right(1, 1, 80)
+            move.motor(1, 1, 80)
             time.sleep(0.5)
             move.motorStop()
 
     def trackLineProcessing(self):
-        # ... (esta función no ha cambiado)
         status_right = GPIO.input(line_pin_right)
         status_middle = GPIO.input(line_pin_middle)
         status_left = GPIO.input(line_pin_left)
 
         if status_middle == 0:
             RPIservo.move(SERVO_STEERING, 90)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80); 
         elif status_left == 0:
             RPIservo.move(SERVO_STEERING, 45)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80); 
         elif status_right == 0:
             RPIservo.move(SERVO_STEERING, 135)
-            move.motor_left(1, 0, 80); move.motor_right(1, 0, 80)
+            move.motor(1, 0, 80);
         else:
             move.motorStop()
         time.sleep(0.1)

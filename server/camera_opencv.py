@@ -1,3 +1,4 @@
+felipe@raspberrypi:~/adeept_picar-b $ cat server/camera_opencv.py 
 # camera_opencv.py (VERSIÓN CON CORRECCIÓN DE COLOR FORZADA Y DEFINITIVA)
 import os
 import cv2
@@ -22,6 +23,11 @@ class CVProcessor(threading.Thread):
 
         self.color_upper = np.array([44, 255, 255])
         self.color_lower = np.array([24, 100, 100])
+
+	# Centrar servos
+        self.pan_angle = 90
+        self.tilt_angle = 90
+
         self.avg_background = None
         
         self._flag = threading.Event()
@@ -33,6 +39,10 @@ class CVProcessor(threading.Thread):
         self.resume()
 
     def find_color(self, frame):
+        # Obtener dimersiones del frame
+        (h, w) = frame.shape[:2]
+        center_x, center_y = w // 2, h // 2
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.color_lower, self.color_upper)
         mask = cv2.erode(mask, None, iterations=2)
@@ -41,13 +51,33 @@ class CVProcessor(threading.Thread):
         cnts = imutils.grab_contours(cnts)
         
         self.drawing_elements = {}
+        target_found = False
         if len(cnts) > 0:
             c = max(cnts, key=cv2.contourArea)
             ((box_x, box_y), radius) = cv2.minEnclosingCircle(c)
             if radius > 10:
+                target_found = True
                 self.drawing_elements['rect'] = (int(box_x - radius), int(box_y - radius), int(box_x + radius), int(box_y + radius))
-                self.drawing_elements['text'] = 'Target Detected'
-        else:
+                self.drawing_elements['text'] = 'Target Locked'
+
+                # Calcular el error
+                error_x = center_x - box_x
+                error_y = center_y - box_y
+
+                self.pan_angle += error_x * 0.05
+                self.tilt_angle -= error_y * 0.05
+
+                # Limitar los ángulos para no forzar los servos
+                if self.pan_angle > 180: self.pan_angle = 180
+                if self.pan_angle < 0: self.pan_angle = 0
+                if self.tilt_angle > 180: self.tilt_angle = 180
+                if self.tilt_angle < 0: self.tilt_angle = 0
+                
+                # Enviar el comando final a los servos
+                RPIservo.move(SERVO_PAN, self.pan_angle)
+                RPIservo.move(SERVO_TILT, self.tilt_angle)
+        
+        if not target_found:
             self.drawing_elements['text'] = 'Target Detecting'
 
     def watch_dog(self, frame):
@@ -103,7 +133,11 @@ class CVProcessor(threading.Thread):
             self.is_processing = False
             self._flag.clear()
 
+    # Dentro de la clase CVProcessor:
     def pause(self):
+        # Al pausar, reseteamos las posiciones de los servos al centro
+        self.pan_angle = 90
+        self.tilt_angle = 90
         self.mode = 'none'
         self.drawing_elements = {}
         self._flag.clear()
@@ -174,3 +208,4 @@ class Camera(BaseCamera):
             
             img = cam_instance.cv_thread.draw_elements_on_frame(img)
             yield cv2.imencode('.jpg', img)[1].tobytes()
+
