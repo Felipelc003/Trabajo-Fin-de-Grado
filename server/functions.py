@@ -44,6 +44,8 @@ def setup_line_pins():
 class Functions(threading.Thread):
     def __init__(self, *args, **kwargs):
         self.functionMode = 'none'
+        self.camera = None # <--- AÑADIDO: Para guardar la referencia a la cámara
+        self.last_turn_direction = 'none'
         self.steadyGoal = 0
         self.websocket = None
         self.event_loop = None
@@ -120,67 +122,85 @@ class Functions(threading.Thread):
     # --- FUNCIÓN DE SEGUIMIENTO DE LÍNEA CON MANIOBRA DE BÚSQUEDA ---
     def trackLineProcessing(self):
         VELOCIDAD = 60
-        VELOCIDAD_BUSQUEDA = 50 # Una velocidad más lenta para la marcha atrás
+        DISTANCIA_OBSTACULO = 15 # en cm
 
+        # 1. PRIORIDAD MÁXIMA: COMPROBAR OBSTÁCULOS
+        dist = ultra.checkdist() * 100 # Convertimos a cm
+        if 0 < dist < DISTANCIA_OBSTACULO:
+            print(f"¡Obstáculo detectado a {dist:.1f} cm! Deteniendo.")
+            move.motorStop()
+            time.sleep(0.1) # Pequeña pausa para evitar lecturas continuas
+            return # Salimos de la función para volver a comprobar en el siguiente ciclo
+
+        # 2. LECTURA DE SENSORES DE LÍNEA
         s_left = GPIO.input(line_pin_left)
         s_mid = GPIO.input(line_pin_middle)
         s_right = GPIO.input(line_pin_right)
-        
         print(f"Estado de los sensores (I-M-D): ({s_left}-{s_mid}-{s_right})")
 
-        # Caso 0: Línea no encontrada al arrancar (0 0 0)
+        # --- LÓGICA DE DECISIÓN ---
 
-        if s_left == 0 and s_mid == 0 and s_right == 0:
-            print("Acción: Recto")
+        # Caso Normal: Seguir la línea
+        if s_left == 0 and s_mid == 1 and s_right == 0: # Recto
             RPIservo.move(SERVO_STEERING, 90)
             move.motor(1, 0, VELOCIDAD)
             self.last_turn_direction = 'none'
-
-        # Caso 1: Línea perfectamente centrada (0 1 0)
-        elif s_left == 0 and s_mid == 1 and s_right == 0:
-            print("Acción: Recto")
-            RPIservo.move(SERVO_STEERING, 90)
-            move.motor(1, 0, VELOCIDAD)
-            self.last_turn_direction = 'none'
-
-        # Caso 2: La línea está a la izquierda del coche (1 X X) -> Girar a la izquierda
-        elif s_left == 1:
-            print("Acción: Corrigiendo a la izquierda")
+        elif s_left == 1: # Corregir a la izquierda
             RPIservo.move(SERVO_STEERING, 45)
             move.motor(1, 0, VELOCIDAD)
             self.last_turn_direction = 'left'
-
-        # Caso 3: La línea está a la derecha del coche (X X 1) -> Girar a la derecha
-        elif s_right == 1:
-            print("Acción: Corrigiendo a la derecha")
+        elif s_right == 1: # Corregir a la derecha
             RPIservo.move(SERVO_STEERING, 135)
             move.motor(1, 0, VELOCIDAD)
             self.last_turn_direction = 'right'
-
-        # --- NUEVA LÓGICA MEJORADA PARA LÍNEA PERDIDA (0 0 0) ---
-        elif s_left == 0 and s_mid == 0 and s_right == 0:
-            print("Acción: ¡Línea perdida! Iniciando maniobra de búsqueda...")
-            
-            # 1. Damos un pequeño paso marcha atrás para reposicionarnos.
-            move.motor(1, 0, VELOCIDAD_BUSQUEDA) # Marcha atrás lento
-            time.sleep(0.25)
-            move.motorStop()
-
-            # 2. Giramos las ruedas en la dirección OPUESTA al último giro.
-            if self.last_turn_direction == 'left':
-                print("   Último giro fue a la izquierda, buscando a la DERECHA.")
-                RPIservo.move(SERVO_STEERING, 135) # Gira a la DERECHA
-            elif self.last_turn_direction == 'right':
-                print("   Último giro fue a la derecha, buscando a la IZQUIERDA.")
-                RPIservo.move(SERVO_STEERING, 45)  # Gira a la IZQUIERDA
-            else:
-                 # Si se perdió en una recta, mantenemos las ruedas centradas.
-                 print("   Se perdió en una recta, las ruedas se mantienen centradas.")
-                 RPIservo.move(SERVO_STEERING, 90)
         
-        # Caso final: Cruce (1 1 1) o estado inesperado -> Parar
-        else:
-            print("Acción: Cruce o estado desconocido. Parando.")
+        # Caso Especial: INTERSECCIÓN (1, 1, 1) -> Activar escaneo de QR
+        elif s_left == 1 and s_mid == 1 and s_right == 1:
+            print("Cruce detectado. Buscando código QR...")
+            move.motorStop()
+            RPIservo.move(SERVO_PAN, 90)
+            RPIservo.move(SERVO_TILT, 90)
+            
+            # Activamos el modo de escaneo en el hilo de la cámara
+            if self.camera:
+                self.camera.cv_thread.set_mode('scanQR', None) # 'None' para que use el frame actual
+                
+                # Esperamos un resultado del QR (máximo 5 segundos)
+                timeout = time.time() + 5
+                instruction = None
+                while time.time() < timeout:
+                    if self.camera.cv_thread.last_qr_result:
+                        instruction = self.camera.cv_thread.last_qr_result
+                        print(f"¡Instrucción recibida del QR: '{instruction}'!")
+                        break
+                    time.sleep(0.1)
+                
+                # Ejecutamos la maniobra según la instrucción
+                if instruction == 'izquierda':
+                    RPIservo.move(SERVO_STEERING, 45)
+                    move.motor(1, 0, VELOCIDAD)
+                    time.sleep(0.8) # Avanza un poco para completar el giro
+                elif instruction == 'derecha':
+                    RPIservo.move(SERVO_STEERING, 135)
+                    move.motor(1, 0, VELOCIDAD)
+                    time.sleep(0.8)
+                else: # Si no hay QR o la instrucción es "recto" o desconocida
+                    print("No se encontró QR o instrucción no válida. Continuando recto.")
+                    RPIservo.move(SERVO_STEERING, 90)
+                    move.motor(1, 0, VELOCIDAD)
+                    time.sleep(0.5) # Avanza un poco para pasar el cruce
+
+                # Desactivamos el modo de escaneo para volver a la normalidad
+                self.camera.cv_thread.set_mode('none', None)
+
+        # Caso de Recuperación: Línea perdida (0, 0, 0)
+        elif s_left == 0 and s_mid == 0 and s_right == 0:
+            # ... (la lógica de búsqueda que ya teníamos funciona aquí)
+            move.motor(1, 1, 50); time.sleep(0.25); move.motorStop()
+            if self.last_turn_direction == 'left': RPIservo.move(SERVO_STEERING, 135)
+            elif self.last_turn_direction == 'right': RPIservo.move(SERVO_STEERING, 45)
+        
+        else: # Cualquier otro estado inesperado
             move.motorStop()
 
         time.sleep(0.05)

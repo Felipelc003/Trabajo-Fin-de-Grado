@@ -9,6 +9,7 @@ import move
 import datetime
 import threading
 import imutils
+from pyzbar import pyzbar # <--- AÑADIDO
 
 # Definimos los servos aquí para que el script sea más claro
 SERVO_TILT = 0
@@ -30,11 +31,31 @@ class CVProcessor(threading.Thread):
         self.pan_angle = 90.0
         self.tilt_angle = 90.0
         self.avg_background = None
-        
+
+        self.last_qr_result = None # <--- AÑADIDO: Para guardar el resultado del QR
+
         self._flag = threading.Event()
         self._flag.clear()
 
+    def scan_qr(self, frame):
+        self.drawing_elements = {}
+        barcodes = pyzbar.decode(frame)
+        if barcodes:
+            # Nos centramos en el QR más grande/cercano
+            barcode = max(barcodes, key=lambda b: b.rect[2] * b.rect[3])
+            barcodeData = barcode.data.decode("utf-8")
+            
+            # Guardamos el resultado para que el otro hilo pueda leerlo
+            self.last_qr_result = barcodeData
+            
+            # Preparamos los elementos para dibujar en pantalla
+            (x, y, w, h) = barcode.rect
+            self.drawing_elements['qr_rect'] = (x, y, x + w, y + h)
+            self.drawing_elements['qr_text'] = barcodeData
+
     def set_mode(self, new_mode, image):
+        if new_mode != self.mode:
+            self.last_qr_result = None
         self.mode = new_mode
         self.img_to_process = image
         self.resume()
@@ -106,6 +127,13 @@ class CVProcessor(threading.Thread):
         elif self.mode == 'watchDog':
             if 'motion_rect' in self.drawing_elements: x1, y1, x2, y2 = self.drawing_elements['motion_rect']; cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         return frame
+        elif self.mode == 'scanQR':
+            if 'qr_rect' in self.drawing_elements:
+                x1, y1, x2, y2 = self.drawing_elements['qr_rect']
+                text = self.drawing_elements.get('qr_text', '')
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, text, (x1, y1 - 10), self.font, 0.7, (0, 255, 0), 2)
+        return frame
 
     def run(self):
         while True:
@@ -115,6 +143,8 @@ class CVProcessor(threading.Thread):
             if self.img_to_process is not None:
                 if self.mode == 'findColor': self.find_color(self.img_to_process)
                 elif self.mode == 'watchDog': self.watch_dog(self.img_to_process)
+                # --- AÑADIDO: Llamada a la función de escaneo de QR ---
+                elif self.mode == 'scanQR': self.scan_qr(self.img_to_process)
             self.is_processing = False; self._flag.clear()
 
     def pause(self):

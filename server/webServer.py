@@ -154,6 +154,7 @@ if __name__ == '__main__':
     
     servoPosInit()
     flask_app = app.webapp()
+    fuc.camera = flask_app # Damos al hilo de funciones acceso a la cámara
     flask_app.startthread()
     wifi_check()
     
