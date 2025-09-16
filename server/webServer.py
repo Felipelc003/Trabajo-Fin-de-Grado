@@ -7,7 +7,7 @@ os.environ['GPIOZERO_PIN_FACTORY'] = 'pigpio'
 import time, threading, move, info, RPIservo, functions, robotLight, socket, asyncio, websockets, json, app
 
 SERVO_TILT, SERVO_PAN, SERVO_STEERING = 0, 1, 2
-speed_set = 100
+speed_set = 80
 fuc = functions.Functions()
 fuc.start()
 RL = None
@@ -15,7 +15,7 @@ flask_app = None
 
 def servoPosInit():
     print("Centrando servos...")
-    RPIservo.move(SERVO_STEERING, 90); RPIservo.move(SERVO_PAN, 90); RPIservo.move(SERVO_TILT, 90)
+    RPIservo.move(SERVO_STEERING, 95); RPIservo.move(SERVO_PAN, 90); RPIservo.move(SERVO_TILT, 90)
 
 def robotCtrl(command):
     # ... (sin cambios)
@@ -29,9 +29,9 @@ def robotCtrl(command):
     if 'forward' == command: move.motor(1, 0, speed_set);
     elif 'backward' == command: move.motor(1, 1, speed_set);
     elif 'DS' in command: move.motorStop()
-    elif 'left' == command: RPIservo.move(SERVO_STEERING, 135)
-    elif 'right' == command: RPIservo.move(SERVO_STEERING, 45)
-    elif 'TS' in command: RPIservo.move(SERVO_STEERING, 90)
+    elif 'left' == command: RPIservo.move(SERVO_STEERING, 130)
+    elif 'right' == command: RPIservo.move(SERVO_STEERING, 66)
+    elif 'TS' in command: RPIservo.move(SERVO_STEERING, 95)
     elif 'lookleft' == command: RPIservo.move(SERVO_PAN, 135)
     elif 'lookright' == command: RPIservo.move(SERVO_PAN, 45)
     elif 'up' == command: RPIservo.move(SERVO_TILT, 135)

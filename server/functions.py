@@ -121,88 +121,64 @@ class Functions(threading.Thread):
 
     # --- FUNCIÓN DE SEGUIMIENTO DE LÍNEA CON MANIOBRA DE BÚSQUEDA ---
     def trackLineProcessing(self):
+        """
+        Seguimiento de línea simple y suave:
+        - Ajuste proporcional del servo de dirección según los sensores.
+        - Sin cruces ni QR.
+        - Si se pierde la línea, busca en la última dirección conocida.
+        """
         VELOCIDAD = 60
-        DISTANCIA_OBSTACULO = 15 # en cm
+        KP = 10   # Ganancia proporcional para el servo (ajusta sensibilidad)
 
-        # 1. PRIORIDAD MÁXIMA: COMPROBAR OBSTÁCULOS
-        dist = ultra.checkdist() * 100 # Convertimos a cm
-        if 0 < dist < DISTANCIA_OBSTACULO:
-            print(f"¡Obstáculo detectado a {dist:.1f} cm! Deteniendo.")
-            move.motorStop()
-            time.sleep(0.1) # Pequeña pausa para evitar lecturas continuas
-            return # Salimos de la función para volver a comprobar en el siguiente ciclo
-
-        # 2. LECTURA DE SENSORES DE LÍNEA
         s_left = GPIO.input(line_pin_left)
         s_mid = GPIO.input(line_pin_middle)
         s_right = GPIO.input(line_pin_right)
-        print(f"Estado de los sensores (I-M-D): ({s_left}-{s_mid}-{s_right})")
+        print(f"Sensores (I-M-D): {s_left}-{s_mid}-{s_right}")
 
-        # --- LÓGICA DE DECISIÓN ---
+        # Valor base del servo (recto)
+        target_angle = 95  
 
-        # Caso Normal: Seguir la línea
-        if s_left == 0 and s_mid == 1 and s_right == 0: # Recto
-            RPIservo.move(SERVO_STEERING, 90)
-            move.motor(1, 0, VELOCIDAD)
-            self.last_turn_direction = 'none'
-        elif s_left == 1: # Corregir a la izquierda
-            RPIservo.move(SERVO_STEERING, 45)
-            move.motor(1, 0, VELOCIDAD)
+        if s_mid == 1 and s_left == 0 and s_right == 0:
+            # Línea centrada
+            target_angle = 95
+            self.last_turn_direction = 'center'
+
+        elif s_left == 1 and s_mid == 0:
+            # Línea a la izquierda → corregir proporcionalmente
+            target_angle = 95 + KP
             self.last_turn_direction = 'left'
-        elif s_right == 1: # Corregir a la derecha
-            RPIservo.move(SERVO_STEERING, 135)
-            move.motor(1, 0, VELOCIDAD)
+
+        elif s_right == 1 and s_mid == 0:
+            # Línea a la derecha → corregir proporcionalmente
+            target_angle = 95 - KP
             self.last_turn_direction = 'right'
-        
-        # Caso Especial: INTERSECCIÓN (1, 1, 1) -> Activar escaneo de QR
-        elif s_left == 1 and s_mid == 1 and s_right == 1:
-            print("Cruce detectado. Buscando código QR...")
-            move.motorStop()
-            RPIservo.move(SERVO_PAN, 90)
-            RPIservo.move(SERVO_TILT, 90)
-            
-            # Activamos el modo de escaneo en el hilo de la cámara
-            if self.camera:
-                self.camera.cv_thread.set_mode('scanQR', None) # 'None' para que use el frame actual
-                
-                # Esperamos un resultado del QR (máximo 5 segundos)
-                timeout = time.time() + 5
-                instruction = None
-                while time.time() < timeout:
-                    if self.camera.cv_thread.last_qr_result:
-                        instruction = self.camera.cv_thread.last_qr_result
-                        print(f"¡Instrucción recibida del QR: '{instruction}'!")
-                        break
-                    time.sleep(0.1)
-                
-                # Ejecutamos la maniobra según la instrucción
-                if instruction == 'izquierda':
-                    RPIservo.move(SERVO_STEERING, 45)
-                    move.motor(1, 0, VELOCIDAD)
-                    time.sleep(0.8) # Avanza un poco para completar el giro
-                elif instruction == 'derecha':
-                    RPIservo.move(SERVO_STEERING, 135)
-                    move.motor(1, 0, VELOCIDAD)
-                    time.sleep(0.8)
-                else: # Si no hay QR o la instrucción es "recto" o desconocida
-                    print("No se encontró QR o instrucción no válida. Continuando recto.")
-                    RPIservo.move(SERVO_STEERING, 90)
-                    move.motor(1, 0, VELOCIDAD)
-                    time.sleep(0.5) # Avanza un poco para pasar el cruce
 
-                # Desactivamos el modo de escaneo para volver a la normalidad
-                self.camera.cv_thread.set_mode('none', None)
+        elif s_left == 1 and s_mid == 1 and s_right == 0:
+            # Entre centro e izquierda
+            target_angle = 95 + KP // 2
+            self.last_turn_direction = 'left'
 
-        # Caso de Recuperación: Línea perdida (0, 0, 0)
-        elif s_left == 0 and s_mid == 0 and s_right == 0:
-            # ... (la lógica de búsqueda que ya teníamos funciona aquí)
-            move.motor(1, 1, 50); time.sleep(0.25); move.motorStop()
-            if self.last_turn_direction == 'left': RPIservo.move(SERVO_STEERING, 135)
-            elif self.last_turn_direction == 'right': RPIservo.move(SERVO_STEERING, 45)
-        
-        else: # Cualquier otro estado inesperado
-            move.motorStop()
+        elif s_right == 1 and s_mid == 1 and s_left == 0:
+            # Entre centro y derecha
+            target_angle = 95 - KP // 2
+            self.last_turn_direction = 'right'
 
+        else:
+            # Línea perdida (000 o estado extraño)
+            print("⚠️ Línea perdida, buscando...")
+            if self.last_turn_direction == 'left':
+                target_angle = 130   # gira buscando izquierda
+            elif self.last_turn_direction == 'right':
+                target_angle = 66  # gira buscando derecha
+            else:
+                target_angle = 95   # si no hay historial, mantener recto
+
+        # Limitar ángulo entre 45° y 135°
+        target_angle = max(66, min(130, target_angle))
+        RPIservo.move(SERVO_STEERING, target_angle)
+
+        # Avanza siempre hacia delante
+        move.motor(1, 0, VELOCIDAD)
         time.sleep(0.05)
 
     def functionGoing(self):

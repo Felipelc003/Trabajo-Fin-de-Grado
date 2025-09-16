@@ -126,7 +126,6 @@ class CVProcessor(threading.Thread):
             if 'rect' in self.drawing_elements: x1, y1, x2, y2 = self.drawing_elements['rect']; cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         elif self.mode == 'watchDog':
             if 'motion_rect' in self.drawing_elements: x1, y1, x2, y2 = self.drawing_elements['motion_rect']; cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        return frame
         elif self.mode == 'scanQR':
             if 'qr_rect' in self.drawing_elements:
                 x1, y1, x2, y2 = self.drawing_elements['qr_rect']
