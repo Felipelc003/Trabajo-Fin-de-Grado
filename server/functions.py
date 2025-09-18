@@ -127,6 +127,9 @@ class Functions(threading.Thread):
         - Sin cruces ni QR.
         - Si se pierde la línea, busca en la última dirección conocida.
         """
+        CENTER = 95
+        LEFT = 130
+        RIGHT = 60
         VELOCIDAD = 60
         KP = 10   # Ganancia proporcional para el servo (ajusta sensibilidad)
 
@@ -136,45 +139,45 @@ class Functions(threading.Thread):
         print(f"Sensores (I-M-D): {s_left}-{s_mid}-{s_right}")
 
         # Valor base del servo (recto)
-        target_angle = 95  
+        target_angle = CENTER  
 
         if s_mid == 1 and s_left == 0 and s_right == 0:
             # Línea centrada
-            target_angle = 95
+            target_angle = CENTER
             self.last_turn_direction = 'center'
 
         elif s_left == 1 and s_mid == 0:
             # Línea a la izquierda → corregir proporcionalmente
-            target_angle = 95 + KP
+            target_angle = CENTER + KP
             self.last_turn_direction = 'left'
 
         elif s_right == 1 and s_mid == 0:
             # Línea a la derecha → corregir proporcionalmente
-            target_angle = 95 - KP
+            target_angle = CENTER - KP
             self.last_turn_direction = 'right'
 
         elif s_left == 1 and s_mid == 1 and s_right == 0:
             # Entre centro e izquierda
-            target_angle = 95 + KP // 2
+            target_angle = CENTER + KP // 2
             self.last_turn_direction = 'left'
 
         elif s_right == 1 and s_mid == 1 and s_left == 0:
             # Entre centro y derecha
-            target_angle = 95 - KP // 2
+            target_angle = CENTER - KP // 2
             self.last_turn_direction = 'right'
 
         else:
             # Línea perdida (000 o estado extraño)
             print("⚠️ Línea perdida, buscando...")
             if self.last_turn_direction == 'left':
-                target_angle = 130   # gira buscando izquierda
+                target_angle = LEFT   # gira buscando izquierda
             elif self.last_turn_direction == 'right':
-                target_angle = 66  # gira buscando derecha
+                target_angle = RIGHT  # gira buscando derecha
             else:
-                target_angle = 95   # si no hay historial, mantener recto
+                target_angle = CENTER   # si no hay historial, mantener recto
 
         # Limitar ángulo entre 45° y 135°
-        target_angle = max(66, min(130, target_angle))
+        target_angle = max(RIGHT, min(LEFT, target_angle))
         RPIservo.move(SERVO_STEERING, target_angle)
 
         # Avanza siempre hacia delante
