@@ -1,167 +1,266 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # File name   : webServer.py
-# Description : Servidor principal para PiCar-B (Versión Final Definitiva)
+# Description : WebSocket server para controlar PiCar-B (1 motor + servo dirección)
+# Autor: Adeept | Adaptado para TFG (RobotLight API actual + move.py canal A)
+
 import os
-os.environ['GPIOZERO_PIN_FACTORY'] = 'pigpio'
+import sys
+import time
+import threading
+import asyncio
+import websockets
+import json
+import socket
 
-import time, threading, move, info, RPIservo, functions, robotLight, socket, asyncio, websockets, json, app
+import move
+import RPIservo
+import functions
+import robotLight
+import ultra
+import switch
+import app
 
-SERVO_TILT, SERVO_PAN, SERVO_STEERING = 0, 1, 2
+# =================== Estado global ===================
 speed_set = 80
+direction_command = 'no'
+turn_command = 'no'
+
+# Servo IDs (según tu PCA9685)
+SERVO_TILT = 0
+SERVO_PAN = 1
+SERVO_STEERING = 2
+
+# =================== Luces ===================
+try:
+    RL = robotLight.RobotLight()
+    RL.start()  # hilo de efectos (breath, police, rainbow...)
+except Exception as e:
+    RL = None
+    print(f"[robotLight] No disponible: {e}")
+
+# =================== Hilo de funciones (radar, automático, sigue-líneas) ===================
 fuc = functions.Functions()
 fuc.start()
-RL = None
-flask_app = None
 
+# =================== Utilidades ===================
 def servoPosInit():
-    print("Centrando servos...")
-    RPIservo.move(SERVO_STEERING, 95); RPIservo.move(SERVO_PAN, 90); RPIservo.move(SERVO_TILT, 90)
-
-def robotCtrl(command):
-    # ... (sin cambios)
-    if RL:
-        if 'forward' == command: RL.front_color('blue')
-        elif 'left' == command: RL.front_turn_left()
-        elif 'right' == command: RL.front_turn_right()
-        elif 'DS' in command or 'TS' in  command: RL.front_color('cian')
-        elif 'backward' == command: RL.front_color('yellow')
-    
-    if 'forward' == command: move.motor(1, 0, speed_set);
-    elif 'backward' == command: move.motor(1, 1, speed_set);
-    elif 'DS' in command: move.motorStop()
-    elif 'left' == command: RPIservo.move(SERVO_STEERING, 130)
-    elif 'right' == command: RPIservo.move(SERVO_STEERING, 66)
-    elif 'TS' in command: RPIservo.move(SERVO_STEERING, 95)
-    elif 'lookleft' == command: RPIservo.move(SERVO_PAN, 135)
-    elif 'lookright' == command: RPIservo.move(SERVO_PAN, 45)
-    elif 'up' == command: RPIservo.move(SERVO_TILT, 135)
-    elif 'down' == command: RPIservo.move(SERVO_TILT, 45)
-    elif 'home' == command: servoPosInit()
+    """Centra dirección, pan y tilt."""
+    RPIservo.move(SERVO_STEERING, 90)
+    RPIservo.move(SERVO_PAN, 90)
+    RPIservo.move(SERVO_TILT, 90)
 
 def wifi_check():
-    # ... (sin cambios)
+    """
+    Señaliza estado de red con RobotLight:
+    - Conectado: frontal verde + traseros verde
+    - AP: frontal azul + traseros azul
+    """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("1.1.1.1", 80)); s.close()
-        print("CONEXION WIFI OK")
-        if RL: RL.front_color('green')
-    except:
-        print("CONEXION WIFI FALLIDA. Creando punto de acceso (Hotspot)...")
-        ap = threading.Thread(target=lambda: os.system("sudo create_ap wlan0 eth0 Adeept_Robot 12345678"))
-        ap.daemon = True
-        ap.start()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.5)
+        s.connect(("1.1.1.1", 80))
+        s.close()
+        print("Wi-Fi conectado.")
+        if RL:
+            RL.front_color('green')           # delanteros en verde
+            RL.rear_set_color(0, 255, 255)      # traseros verde
+            # efecto suave opcional en traseros:
+            RL.breath(0.0, 1.0, 0.0)          # verde respirando
+    except Exception:
+        print("No hay Wi-Fi, creando AP...")
+        if RL:
+            RL.front_color('blue')            # delanteros en azul
+            RL.rear_set_color(0, 0, 255)      # traseros azul
+            RL.breath(0.0, 0.0, 1.0)          # azul respirando
+        os.system("sudo create_ap wlan0 eth0 Adeept_Robot &")
+
+def robotCtrl(command_input, response):
+    """Traduce comandos básicos a acciones de motor/servo/luces."""
+    global direction_command, turn_command, speed_set
+
+    if command_input == 'forward':
+        direction_command = 'forward'
+        move.forward(speed_set)
         if RL: RL.front_color('blue')
 
-async def recv_msg(websocket):
+    elif command_input == 'backward':
+        direction_command = 'backward'
+        move.backward(speed_set)
+        if RL: RL.front_color('red')  # rojo al retroceder
+
+    elif 'DS' in command_input:  # Stop
+        direction_command = 'no'
+        move.stop()
+        if RL: RL.front_all_off()
+
+    elif 'TS' in command_input:  # Straight steering
+        turn_command = 'no'
+        RPIservo.move(SERVO_STEERING, 95)
+        if RL: RL.front_all_off()
+
+    elif command_input == 'left':
+        turn_command = 'left'
+        RPIservo.move(SERVO_STEERING, 120)
+        if RL: RL.front_turn_left()  # en tu clase ahora pone blanco
+
+    elif command_input == 'right':
+        turn_command = 'right'
+        RPIservo.move(SERVO_STEERING, 70)
+        if RL: RL.front_turn_right()  # blanco
+
+    elif command_input == 'lookleft':
+        RPIservo.move(SERVO_PAN, 180)
+
+    elif command_input == 'lookright':
+        RPIservo.move(SERVO_PAN, 0)
+
+    elif command_input == 'up':
+        RPIservo.move(SERVO_TILT, 180)
+
+    elif command_input == 'down':
+        RPIservo.move(SERVO_TILT, 0)
+
+    elif command_input == 'home':
+        RPIservo.move(SERVO_PAN, 90)
+        RPIservo.move(SERVO_TILT, 85)
+
+# =================== WebSocket server ===================
+async def recv_msg(websocket, path):
+    """Bucle principal de mensajes después del login."""
     global speed_set
+    loop = asyncio.get_event_loop()
+
     while True:
         try:
-            raw_data = await websocket.recv()
-            parts = raw_data.split(); command = parts[0]
-            value = ' '.join(parts[1:]) if len(parts) > 1 else None
-            
-            if command in ['forward','backward','DS','left','right','TS','lookleft','lookright','up','down','home']:
-                robotCtrl(command)
-            
-            elif command == 'scan':
-                print("📡 Iniciando escaneo de radar...")
+            data = await websocket.recv()
+
+            # ---- Comandos básicos de texto ----
+            if data in ['forward', 'backward', 'DS', 'TS', 'left', 'right',
+                        'lookleft', 'lookright', 'up', 'down', 'home']:
+                robotCtrl(data, websocket)
+
+            # ---- Velocidad: "Speed <valor>" ----
+            elif data.startswith('Speed'):
+                try:
+                    _, val = data.split()
+                    speed_set = move.speed_set(int(val))
+                except Exception:
+                    pass
+
+            # ---- Radar (scan único) ----
+            elif data == 'scan':
                 scan_data = fuc.radarScan()
-                response = {'title': 'scanResult', 'data': scan_data}
-                await websocket.send(json.dumps(response))
+                await websocket.send(json.dumps({
+                    'title': 'scanResult',
+                    'data': scan_data
+                }))
 
-            elif command == 'trackLine':
-                print("Función 'Seguimiento de Línea' activada.")
-                servoPosInit()
-                fuc.trackLine()
+            # ---- Modo seguimiento de línea ----
+            elif data == 'trackLine':
+                fuc.modeSet('trackLine')
 
-            elif command == 'automatic':
-                print("🤖 Activando modo 'Automático' con radar en vivo.")
-                fuc.automatic(websocket, asyncio.get_event_loop())
+            # ---- Modo automático (evitación obst.) ----
+            elif data == 'automatic':
+                fuc.automatic(websocket, loop)
 
-            elif command == 'pauseFunctions':
-                print("Pausando todas las funciones activas.")
+            elif data == 'pauseFunctions':
                 fuc.pause()
 
-            elif command == 'findColor':
-                print("🎥 Activando modo 'Buscar Color' en el stream de vídeo.")
-                if flask_app:
-                    flask_app.modeselect('findColor')
-
-            elif command == 'motionGet':
-                print("🎥 Activando modo 'Detección de Movimiento'.")
-                if flask_app:
-                    flask_app.modeselect('watchDog')
-
-            elif command == 'stopCV':
-                print("🎥 Deteniendo todos los modos de Visión Artificial.")
-                if flask_app:
-                    flask_app.modeselect('none')
-
-            # ---- NUEVO BLOQUE PARA OBTENER INFORMACIÓN ----
-            elif command == 'get_info':
-                # No imprimimos nada para no llenar la consola del servidor
-                try:
-                    info_data = {
-                        'cpu_temp': info.get_cpu_tempfunc(),
-                        'cpu_use': info.get_cpu_use(),
-                        'ram_use': info.get_ram_info()[1] # get_ram_info() devuelve (total, used), queremos el segundo valor
+            # ---- Telemetría sistema ----
+            elif data == 'get_info':
+                cpu_temp_raw = os.popen("cat /sys/class/thermal/thermal_zone0/temp").readline()
+                cpu_temp = round(float(cpu_temp_raw) / 1000, 2)
+                cpu_usage = os.popen("top -n1 | awk '/Cpu/ {print $2}'").readline().strip()
+                ram_usage = os.popen("free -m | awk 'NR==2{print $3}'").readline().strip()
+                await websocket.send(json.dumps({
+                    'title': 'info_update',
+                    'data': {
+                        'CPU_Temp': cpu_temp,
+                        'CPU_Usage': cpu_usage,
+                        'RAM_Usage': ram_usage
                     }
-                    response = {'title': 'info_update', 'data': info_data}
-                    await websocket.send(json.dumps(response))
-                except Exception as e:
-                    print(f"Error al obtener info del sistema: {e}")
-            # ---- FIN DEL NUEVO BLOQUE ----
+                }))
 
-            elif command in ['police','rainbow'] and RL:
-                getattr(RL, command)()
-            
-            elif command == 'Speed' and value:
-                speed_set = int(value)
-                move.speed_set(speed_set)
-            
-            elif command == 'FCSET' and value:
-                print(f"🎨 Recibidos nuevos valores HSV: {value}")
+            # ---- Visión por computadora ----
+            elif data == 'findColor':
+                app.flask_app.modeselect('findColor')
+
+            elif data == 'motionGet':
+                app.flask_app.modeselect('watchDog')
+
+            elif data == 'stopCV':
+                app.flask_app.modeselect('none')
+
+            elif data.startswith('FCSET'):
                 try:
-                    h, s, v = map(int, value.split())
-                    if flask_app:
-                        flask_app.colorFindSet(h, s, v)
-                except Exception as e:
-                    print(f"Error al procesar valores HSV: {e}")
+                    _, h, s, v = data.split()
+                    app.flask_app.colorFindSet(int(h), int(s), int(v))
+                except Exception:
+                    pass
+
+            # ---- Modos de luces especiales ----
+            elif data == 'police':
+                if RL: RL.police()
+
+            elif data == 'rainbow':
+                if RL: RL.rainbow()
 
         except websockets.exceptions.ConnectionClosed:
-            move.motorStop(); 
-            if RL: RL.front_all_off(); RL.breath(0.3, 0.3, 1.0)
+            print("Cliente desconectado")
+            move.stop()
             break
         except Exception as e:
-            print(f"Error procesando comando: {e}")
+            print(f"[WS] Error procesando comando: {e}")
 
 async def main_logic(websocket, path):
-    if await websocket.recv() == "admin:123456":
-        await websocket.send("congratulation"); await recv_msg(websocket)
-    else:
-        await websocket.send("sorry")
+    """Login simple por primer mensaje."""
+    try:
+        auth = await websocket.recv()
+        if auth.strip() == "admin:123456":
+            await websocket.send("congratulation")
+            await recv_msg(websocket, path)
+        else:
+            await websocket.send("sorry")
+    except websockets.exceptions.ConnectionClosed:
+        pass
 
-async def main():
-    async with websockets.serve(main_logic, "0.0.0.0", 8888):
-        await asyncio.Future()
-
+# =================== Main ===================
 if __name__ == '__main__':
-    try:
-        RL = robotLight.RobotLight()
-        RL.start()
-    except Exception as e: 
-        print(f"ADVERTENCIA: No se pudo instanciar el controlador de luces: {e}")
-        RL = None
-    
+    # GPIO de switches (si los usas)
+    switch.switchSetup()
+    switch.set_all_switch_off()
+
+    # Motor único en canal A
+    move.setup()
+
+    # Servos a home
     servoPosInit()
-    flask_app = app.webapp()
-    fuc.camera = flask_app # Damos al hilo de funciones acceso a la cámara
-    flask_app.startthread()
-    wifi_check()
-    
+
+    # Arranque de servidor de cámara/FPV (tu app debe exponer flask_app)
+    # Si tu implementación requiere otra inicialización, ajústalo aquí.
     try:
-        print("Servidor Websocket esperando en 0.0.0.0:8888..."); asyncio.run(main())
+        app.flask_app.startthread()
+    except Exception:
+        try:
+            flask_app = app.webapp()
+            flask_app.startthread()
+            app.flask_app = flask_app
+        except Exception as e:
+            print(f"[camera] Aviso: no se pudo iniciar el hilo de cámara: {e}")
+
+    # Señalización de red (usa RobotLight API actual)
+    wifi_check()
+
+    # WebSocket en 0.0.0.0:8888
+    start_server = websockets.serve(main_logic, '0.0.0.0', 8888)
+    asyncio.get_event_loop().run_until_complete(start_server)
+
+    try:
+        asyncio.get_event_loop().run_forever()
     except KeyboardInterrupt:
-        print("\nServidor detenido.")
+        pass
     finally:
-        print("Limpiando recursos..."); move.destroy(); RPIservo.cleanup()
+        move.stop()
+        move.destroy()
+        RPIservo.cleanup()
         if RL: RL.cleanup()
