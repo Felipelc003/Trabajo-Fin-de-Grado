@@ -51,6 +51,11 @@ class Functions(threading.Thread):
         self.event_loop = None
         setup_line_pins()
 
+        # Estados para QR
+        self.qr_latched = False
+        self.qr_last_try = 0.0
+        self.qr_cooldown_s = 12
+
         # Estados para el modo automático
         self.auto_state = "AVANZAR"
         self.turn_direction = "derecha"
@@ -186,6 +191,9 @@ class Functions(threading.Thread):
     def trackLine(self):
         self.functionMode = 'trackLine'
         self.last_turn_direction = 'none' 
+        self.qr_latched = False
+        self.qr_last_try = 0.0
+
         self.resume()
 
     def automaticProcessing(self):
@@ -212,16 +220,31 @@ class Functions(threading.Thread):
         print(f"Sensores (I-M-D): {s_left}-{s_mid}-{s_right}")
 
         if s_left == 1 and s_mid == 1 and s_right == 1:
+            # Línea perdida: centra y detén movimiento
             RPIservo.move(SERVO_STEERING, CENTER)
             move.stop()
-            
+
+            # Evitar relanzar scanQR en bucle:
+            now = time.time()
             try:
                 cam = Camera.get_instance()
-                print(f"[trackLine] Camera instance OK. Modo previo: {cam.modeSelect}")
-                cam.modeselect('scanQR')
-                print("[trackLine] Modo solicitado: scanQR")
-            except Exception as e:
-                print(f"[trackLine] Aviso: no pude activar scanQR: {e}")
+                # Si ya está escaneando o acabamos de intentarlo, no reintentes
+                already_scanning = (cam.modeSelect == 'scanQR') or getattr(cam.cv_thread, 'qr_scanning', False)
+            except Exception:
+                already_scanning = False
+
+            if (not self.qr_latched) and (now - self.qr_last_try > self.qr_cooldown_s) and (not already_scanning):
+                try:
+                    print(f"[trackLine] Camera instance OK. Modo previo: {cam.modeSelect}")
+                    cam.modeselect('scanQR')
+                    print("[trackLine] Modo solicitado: scanQR")
+                except Exception as e:
+                    print(f"[trackLine] Aviso: no pude activar scanQR: {e}")
+                # Latch + marca de tiempo para no repetir
+                self.qr_latched = True
+                self.qr_last_try = now
+
+            # Mantén este return para salir del ciclo de seguimiento en esta iteración
             self.pause()
             return
 

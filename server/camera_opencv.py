@@ -83,7 +83,14 @@ class CVProcessor(threading.Thread):
             # Termina el modo tras detectar
             self.qr_scanning = False
             self.mode = 'none'
+            try:
+                from camera_opencv import Camera
+                Camera.get_instance().modeSelect = 'none'
+            except Exception:
+                pass
             return
+           
+           
 
         # 2) No hay QR -> avanzar barrido PAN
         if self.qr_pan <= 180:
@@ -99,6 +106,16 @@ class CVProcessor(threading.Thread):
             # Fin del modo sin detectar
             self.qr_scanning = False
             self.mode = 'none'
+            try:
+                from camera_opencv import Camera
+                Camera.get_instance().modeSelect = 'none'
+            except Exception:
+                pass
+
+            RPIservo.move(SERVO_PAN,90)
+            print("Deteniendo")
+            self.pause()
+
 
     def set_mode(self, new_mode, image):
         if new_mode != self.mode:
