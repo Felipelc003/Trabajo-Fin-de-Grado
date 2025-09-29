@@ -33,25 +33,72 @@ class CVProcessor(threading.Thread):
         self.avg_background = None
 
         self.last_qr_result = None # <--- AÑADIDO: Para guardar el resultado del QR
+        self.qr_scanning = False
+        self.qr_pan = 0
+        self.qr_step = 5         # grados por paso del barrido
+        self.qr_reported = False
 
         self._flag = threading.Event()
         self._flag.clear()
 
     def scan_qr(self, frame):
+        """
+        Barrido horizontal 0→180 buscando QR.
+        Si lo detecta, imprime el contenido y sale del modo.
+        Si termina el barrido sin encontrar, lo informa y sale del modo.
+        """
+        # Inicialización del barrido la primera vez
+        if not self.qr_scanning:
+            self.qr_scanning = True
+            self.qr_pan = 0
+            self.qr_step = 5
+            self.qr_reported = False
+            self.last_qr_result = None
+            self.drawing_elements = {}
+            print("[scanQR] Inicializando barrido 0→180")
+            try:
+                RPIservo.move(SERVO_TILT, 90)
+                RPIservo.move(SERVO_PAN, 0)
+            except Exception:
+                pass
+
+        # Limpia overlays previos
         self.drawing_elements = {}
+
+        # 1) Intentar decodificar un QR en este frame
         barcodes = pyzbar.decode(frame)
         if barcodes:
-            # Nos centramos en el QR más grande/cercano
             barcode = max(barcodes, key=lambda b: b.rect[2] * b.rect[3])
-            barcodeData = barcode.data.decode("utf-8")
-            
-            # Guardamos el resultado para que el otro hilo pueda leerlo
-            self.last_qr_result = barcodeData
-            
-            # Preparamos los elementos para dibujar en pantalla
+            data = barcode.data.decode("utf-8")
+            self.last_qr_result = data
+
             (x, y, w, h) = barcode.rect
             self.drawing_elements['qr_rect'] = (x, y, x + w, y + h)
-            self.drawing_elements['qr_text'] = barcodeData
+            self.drawing_elements['qr_text'] = data
+
+            if not self.qr_reported:
+                print(f"[scanQR] ✅ QR detectado: {data}")
+                self.qr_reported = True
+
+            # Termina el modo tras detectar
+            self.qr_scanning = False
+            self.mode = 'none'
+            return
+
+        # 2) No hay QR -> avanzar barrido PAN
+        if self.qr_pan <= 180:
+            try:
+                RPIservo.move(SERVO_PAN, int(self.qr_pan))
+            except Exception:
+                pass
+            print(f"[scanQR] PAN -> {self.qr_pan}°")
+            self.qr_pan += self.qr_step
+        else:
+            if not self.qr_reported:
+                print("[scanQR] ❌ No se ha encontrado ningún QR")
+            # Fin del modo sin detectar
+            self.qr_scanning = False
+            self.mode = 'none'
 
     def set_mode(self, new_mode, image):
         if new_mode != self.mode:
@@ -153,6 +200,9 @@ class CVProcessor(threading.Thread):
 
 class Camera(BaseCamera):
     _instance = None
+    _picam2 = None           # <-- singleton Picamera2 compartido
+    _picam2_lock = threading.Lock()
+
     def __init__(self):
         if Camera._instance is not None: raise RuntimeError("Camera is a singleton, use get_instance()")
         super(Camera, self).__init__()
@@ -167,6 +217,39 @@ class Camera(BaseCamera):
             print("Creando la instancia del objeto Camera por primera vez...")
             cls._instance = Camera()
         return cls._instance
+
+    def modeselect(self, mode: str):
+        """
+        API pública para cambiar de modo sin reabrir la cámara.
+        Ej: Camera.get_instance().modeselect('scanQR')
+        """
+        print(f"[Camera] modeselect -> {mode}")
+        self.modeSelect = mode
+
+    def start_background_feed(self):
+        """
+        Inicia un consumidor en segundo plano que itera frames()
+        y así el hilo CV recibe imágenes incluso sin clientes HTTP.
+        No abre otra cámara: usa la misma tubería.
+        """
+        if getattr(self, "_bg_thread", None):
+            return  # ya está corriendo
+
+        import threading, time
+
+        def _pump():
+            try:
+                for _ in self.frames():
+                    # No necesitamos los bytes JPEG aquí; sólo hacer avanzar el pipeline.
+                    time.sleep(0.01)
+            except Exception as e:
+                print(f"[Camera] background feed stopped: {e}")
+
+        t = threading.Thread(target=_pump, daemon=True)
+        t.start()
+        self._bg_thread = t
+        print("[Camera] background feed started")
+
 
     # --- FUNCIÓN colorFindSet COMPLETAMENTE REESCRITA ---
     def colorFindSet(self, invarH, invarS, invarV):
@@ -199,24 +282,30 @@ class Camera(BaseCamera):
     @staticmethod
     def frames():
         try:
-            from picamera2 import Picamera2
-            print("Inicializando hardware de Picamera2...")
-            picam2 = Picamera2()
-            config = picam2.create_preview_configuration(main={"size": (640, 480)})
-            picam2.configure(config)
-            picam2.start()
-            print("Picamera2 inicializada correctamente.")
+            with Camera._picam2_lock:
+                if Camera._picam2 is None:
+                    from picamera2 import Picamera2
+                    print("Inicializando hardware de Picamera2 (una sola vez)...")
+                    picam2 = Picamera2()
+                    config = picam2.create_preview_configuration(main={"size": (640, 480)})
+                    picam2.configure(config)
+                    picam2.start()
+                    Camera._picam2 = picam2
+                    print("Picamera2 inicializada correctamente (singleton).")
+                else:
+                    picam2 = Camera._picam2
         except Exception as e:
             print(f"Error al iniciar Picamera2: {e}")
             error_img = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(error_img, "Camera Error", (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            while True: yield cv2.imencode('.jpg', error_img)[1].tobytes()
-        
+            while True:
+                 yield cv2.imencode('.jpg', error_img)[1].tobytes()
+
         cam_instance = Camera.get_instance()
         while True:
-            img_rgb = picam2.capture_array()
-            img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-            if cam_instance.modeSelect != 'none' and not cam_instance.cv_thread.is_processing:
-                cam_instance.cv_thread.set_mode(cam_instance.modeSelect, img)
-            img = cam_instance.cv_thread.draw_elements_on_frame(img)
-            yield cv2.imencode('.jpg', img)[1].tobytes()
+           img_rgb = picam2.capture_array()
+           img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+           if cam_instance.modeSelect != 'none' and not cam_instance.cv_thread.is_processing:
+               cam_instance.cv_thread.set_mode(cam_instance.modeSelect, img)
+           img = cam_instance.cv_thread.draw_elements_on_frame(img)
+           yield cv2.imencode('.jpg', img)[1].tobytes()

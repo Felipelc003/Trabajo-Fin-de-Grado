@@ -11,7 +11,7 @@ import asyncio
 import websockets
 import json
 import socket
-
+from camera_opencv import Camera
 import move
 import RPIservo
 import functions
@@ -155,6 +155,13 @@ async def recv_msg(websocket, path):
                     'data': scan_data
                 }))
 
+            # ---- QR (scan rq)
+            elif data == 'scanQR':
+                try:
+                    Camera.get_instance().modeselect('scanQR')
+                except Exception as e:
+                    print(f"[WS] No se pudo activar scanQR: {e}")
+
             # ---- Modo seguimiento de línea ----
             elif data == 'trackLine':
                 fuc.modeSet('trackLine')
@@ -247,6 +254,9 @@ if __name__ == '__main__':
             app.flask_app = flask_app
         except Exception as e:
             print(f"[camera] Aviso: no se pudo iniciar el hilo de cámara: {e}")
+
+    Camera.get_instance().start_background_feed()
+
 
     # Señalización de red (usa RobotLight API actual)
     wifi_check()

@@ -14,7 +14,7 @@ import Kalman_filter
 import move
 import RPIservo
 import asyncio
-
+from camera_opencv import Camera
 # --- Definiciones de Servos para Claridad ---
 SERVO_TILT = 0
 SERVO_PAN = 1
@@ -211,8 +211,23 @@ class Functions(threading.Thread):
         s_right = GPIO.input(line_pin_right)
         print(f"Sensores (I-M-D): {s_left}-{s_mid}-{s_right}")
 
+        if s_left == 1 and s_mid == 1 and s_right == 1:
+            RPIservo.move(SERVO_STEERING, CENTER)
+            move.stop()
+            
+            try:
+                cam = Camera.get_instance()
+                print(f"[trackLine] Camera instance OK. Modo previo: {cam.modeSelect}")
+                cam.modeselect('scanQR')
+                print("[trackLine] Modo solicitado: scanQR")
+            except Exception as e:
+                print(f"[trackLine] Aviso: no pude activar scanQR: {e}")
+            self.pause()
+            return
+
         # Valor base del servo (recto)
         target_angle = CENTER  
+
 
         if s_mid == 1 and s_left == 0 and s_right == 0:
             # Línea centrada
@@ -239,10 +254,6 @@ class Functions(threading.Thread):
             target_angle = CENTER - KP // 2
             self.last_turn_direction = 'right'
 
-        elif s_right == 1 and s_mid == 1 and s_left == 1:
-            # Entre centro y derecha
-            move.stop()
-            
 
         else:
             # Línea perdida (000 o estado extraño)
