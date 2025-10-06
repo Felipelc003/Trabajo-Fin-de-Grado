@@ -78,6 +78,7 @@ class CVProcessor(threading.Thread):
 
             if not self.qr_reported:
                 print(f"[scanQR] ✅ QR detectado: {data}")
+                RPIservo.move(SERVO_PAN,90)
                 self.qr_reported = True
 
             # Termina el modo tras detectar
