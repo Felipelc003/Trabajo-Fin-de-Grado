@@ -155,6 +155,14 @@ class Functions(threading.Thread):
         except Exception:
             try: move.motorStop()
             except: pass
+        # Apaga escaneo y limpia resultado al salir
+        try:
+            cam = Camera.get_instance()
+            cam.modeselect('none')
+            cam.cv_thread.qr_scanning = False
+            cam.cv_thread.last_qr_result = None
+        except Exception:
+            pass
         self.__flag.clear()
         print("Pausando todas las funciones activas.")
 
@@ -180,10 +188,51 @@ class Functions(threading.Thread):
         self.resume()
 
     def trackLine(self):
+        """
+        Reactiva el modo seguidor de línea dejando TODO el estado de QR/cámara limpio,
+        igual que hacía tu versión anterior (que reseteaba qr_latched/qr_last_try),
+        pero extendido a los flags actuales para evitar quedarse parado.
+        """
         self.functionMode = 'trackLine'
+
+        # --- Reseteo estilo versión anterior + flags actuales ---
         self.last_turn_direction = 'none'
         self.qr_latched = False
         self.qr_last_try = 0.0
+
+        # Flags añadidos en la versión nueva que hay que limpiar también
+        self.awaiting_qr = False
+        self.qr_ignore_until = 0.0
+        self.qr_launch_ts = 0.0
+        self.qr_launch_retry_done = False
+        # Si usas boost de giro tras QR:
+        if not hasattr(self, 'qr_turn_boost_until'):
+            self.qr_turn_boost_until = 0.0
+        else:
+            self.qr_turn_boost_until = 0.0
+
+        # --- Detener movimiento y centrar dirección (como hacía la anterior) ---
+        try:
+            move.stop()
+        except Exception:
+            try: move.motorStop()
+            except: pass
+        try:
+            RPIservo.move(SERVO_STEERING, STEER_CENTER)  # 90
+        except Exception:
+            pass
+
+        # --- Apagar cualquier escaneo en curso y limpiar el último resultado ---
+        try:
+            cam = Camera.get_instance()
+            # La vieja versión miraba cam.modeSelect; aquí apagamos modo y flags del hilo:
+            cam.modeselect('none')                            # salir de 'scanQR'
+            # por si el hilo mantuvo estado:
+            cam.cv_thread.qr_scanning = False
+            cam.cv_thread.last_qr_result = None
+        except Exception:
+            pass
+
         self.resume()
 
     # ------------------ (Opcional) Maniobra QR directa — no usada en el enfoque actual ------------------

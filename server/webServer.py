@@ -74,6 +74,105 @@ def wifi_check():
             RL.breath(0.0, 0.0, 1.0)          # azul respirando
         os.system("sudo create_ap wlan0 eth0 Adeept_Robot &")
 
+_prev_cpu_total = None
+_prev_cpu_idle  = None
+
+def _read_cpu_times():
+    """
+    Lee /proc/stat y devuelve (total, idle) como enteros.
+    total = suma de todos los campos
+    idle  = idle + iowait
+    """
+    with open("/proc/stat", "r") as f:
+        first = f.readline()
+    if not first.startswith("cpu "):
+        return None, None
+    parts = first.split()[1:]
+    vals = list(map(int, parts[:10]))  # user nice system idle iowait irq softirq steal guest guest_nice
+    user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice = vals + [0]*(10-len(vals))
+    idle_all = idle + iowait
+    total = sum(vals)
+    return total, idle_all
+
+def read_cpu_usage_percent():
+    """
+    Devuelve el % de CPU usado (0-100) calculado con delta entre lecturas.
+    En la primera llamada hace una doble lectura rápida.
+    """
+    global _prev_cpu_total, _prev_cpu_idle
+    t1, i1 = _read_cpu_times()
+    if t1 is None:
+        return 0.0
+
+    # Primera vez: esperar un instante y medir de nuevo
+    if _prev_cpu_total is None or _prev_cpu_idle is None:
+        time.sleep(0.2)
+        t2, i2 = _read_cpu_times()
+        if t2 is None:
+            return 0.0
+        _prev_cpu_total, _prev_cpu_idle = t2, i2
+        dt, di = (t2 - t1), (i2 - i1)
+    else:
+        dt, di = (t1 - _prev_cpu_total), (i1 - _prev_cpu_idle)
+        _prev_cpu_total, _prev_cpu_idle = t1, i1
+
+    if dt <= 0:
+        return 0.0
+    # uso = (tiempo activo / total) * 100 = (dt - di) / dt
+    usage = (dt - di) * 100.0 / dt
+    return max(0.0, min(100.0, round(usage, 1)))
+
+def read_cpu_temp_c():
+    """
+    Devuelve temperatura CPU en ºC (float). Usa thermal_zone0 y fallback vcgencmd.
+    """
+    # thermal_zone0 (típico en RPi OS)
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            raw = f.readline().strip()
+        val = float(raw) / 1000.0
+        return round(val, 2)
+    except Exception:
+        pass
+
+    # vcgencmd (si firmware/paquete disponible)
+    try:
+        out = subprocess.check_output(["/usr/bin/vcgencmd", "measure_temp"], text=True).strip()
+        # formato: temp=48.0'C
+        if "temp=" in out:
+            s = out.split("temp=")[1]
+            s = s.split("'")[0]
+            return round(float(s), 2)
+    except Exception:
+        pass
+
+    return 0.0
+
+def read_ram_usage_mb_and_percent():
+    """
+    Devuelve (used_mb, percent) usando MemAvailable para cálculo real de uso.
+    """
+    meminfo = {}
+    with open("/proc/meminfo", "r") as f:
+        for line in f:
+            key, val = line.split(":", 1)
+            meminfo[key.strip()] = val.strip()
+
+    def _kb(field):
+        v = meminfo.get(field, "0 kB").split()[0]
+        try:
+            return int(v)
+        except Exception:
+            return 0
+
+    total_kb = _kb("MemTotal")
+    avail_kb = _kb("MemAvailable")  # mejor indicador de memoria disponible real
+    used_kb = max(0, total_kb - avail_kb)
+
+    used_mb = used_kb // 1024
+    percent = 0.0 if total_kb == 0 else (used_kb * 100.0 / total_kb)
+    return used_mb, round(percent, 1)
+
 def robotCtrl(command_input, response):
     """Traduce comandos básicos a acciones de motor/servo/luces."""
     global direction_command, turn_command, speed_set
@@ -109,16 +208,16 @@ def robotCtrl(command_input, response):
         if RL: RL.front_turn_right()  # blanco
 
     elif command_input == 'lookleft':
-        RPIservo.move(SERVO_PAN, 180)
+        RPIservo.move(SERVO_PAN, 60)
 
     elif command_input == 'lookright':
-        RPIservo.move(SERVO_PAN, 0)
+        RPIservo.move(SERVO_PAN, 130)
 
     elif command_input == 'up':
-        RPIservo.move(SERVO_TILT, 180)
+        RPIservo.move(SERVO_TILT, 110)
 
     elif command_input == 'down':
-        RPIservo.move(SERVO_TILT, 0)
+        RPIservo.move(SERVO_TILT, 75)
 
     elif command_input == 'home':
         RPIservo.move(SERVO_PAN, 90)

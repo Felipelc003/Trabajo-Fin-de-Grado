@@ -15,10 +15,15 @@ class RobotLight(threading.Thread):
         except Exception as e:
             print(f"ADVERTENCIA: No se pudo inicializar LEDs delanteros: {e}")
         try:
-            self.pixels = neopixel.NeoPixel(board.D12, 16, brightness=0.8, auto_write=False)
-            print("Controlador de LEDs traseros (neopixel) inicializado.")
+            if os.geteuid() == 0:
+                self.pixels = neopixel.NeoPixel(board.D13, 16, brightness=0.8, auto_write=False)
+                print("Controlador de LEDs traseros (neopixel) inicializado.")
+            else:
+                print("ADVERTENCIA: LEDs traseros deshabilitados (ejecución sin sudo).")
+                self.pixels = None
         except Exception as e:
             print(f"ADVERTENCIA: No se pudo inicializar LEDs traseros: {e}")
+            self.pixels = None
 
         self.lightMode = 'breath'
         self.colorBreathR, self.colorBreathG, self.colorBreathB = 0.3, 0.3, 1.0
