@@ -217,7 +217,7 @@ def robotCtrl(command_input, response):
         RPIservo.move(SERVO_TILT, 110)
 
     elif command_input == 'down':
-        RPIservo.move(SERVO_TILT, 75)
+        RPIservo.move(SERVO_TILT, 65)
 
     elif command_input == 'home':
         RPIservo.move(SERVO_PAN, 90)
@@ -266,8 +266,22 @@ async def recv_msg(websocket, path):
                 fuc.modeSet('trackLine')
 
             # ---- Modo automático (evitación obst.) ----
-            elif data == 'automatic':
-                fuc.automatic(websocket, loop)
+            elif data == 'automatic':   # o 'command' según tu variable
+                print("[WS] Botón 'automatic' → activar trackLine (lineBlack).")
+                try:
+                    fuc.modeSet('trackLine')   # usa tu mismo mecanismo de funciones
+                except Exception as e:
+                    print(f"[WS] No pude lanzar trackLine via fuc.modeSet: {e}")
+                    # Fallback directo a la cámara
+                    try:
+                        from camera_opencv import Camera
+                        cam = Camera.get_instance()
+                        cam.modeselect('lineBlack')
+                        print("[WS] Fallback OK → camera.modeselect('lineBlack').")
+                    except Exception as e2:
+                        print(f"[WS] Fallback a cámara falló: {e2}")
+
+
 
             elif data == 'pauseFunctions':
                 fuc.pause()

@@ -66,6 +66,7 @@ class Functions(threading.Thread):
         self.qr_launch_retry_done = False # si ya hicimos un único reintento de lanzamiento
         self.qr_turn_boost_until = 0.0
 
+        self.camera_managed_line = False  # cuando True, NO ejecutar el bucle antiguo de línea
 
         # --- Estados para el modo automático (no usado aquí) ---
         self.auto_state = "AVANZAR"
@@ -159,8 +160,8 @@ class Functions(threading.Thread):
         try:
             cam = Camera.get_instance()
             cam.modeselect('none')
-            cam.cv_thread.qr_scanning = False
-            cam.cv_thread.last_qr_result = None
+        #    cam.cv_thread.qr_scanning = False
+        #    cam.cv_thread.last_qr_result = None
         except Exception:
             pass
         self.__flag.clear()
@@ -189,51 +190,29 @@ class Functions(threading.Thread):
 
     def trackLine(self):
         """
-        Reactiva el modo seguidor de línea dejando TODO el estado de QR/cámara limpio,
-        igual que hacía tu versión anterior (que reseteaba qr_latched/qr_last_try),
-        pero extendido a los flags actuales para evitar quedarse parado.
+        Activa el modo de cámara 'lineBlack' (detección de línea negra con recuadro verde)
+        y NO usa sensores de línea ni QR. Solo mueve el servo de dirección desde camera_opencv.
         """
-        self.functionMode = 'trackLine'
-
-        # --- Reseteo estilo versión anterior + flags actuales ---
-        self.last_turn_direction = 'none'
-        self.qr_latched = False
-        self.qr_last_try = 0.0
-
-        # Flags añadidos en la versión nueva que hay que limpiar también
-        self.awaiting_qr = False
-        self.qr_ignore_until = 0.0
-        self.qr_launch_ts = 0.0
-        self.qr_launch_retry_done = False
-        # Si usas boost de giro tras QR:
-        if not hasattr(self, 'qr_turn_boost_until'):
-            self.qr_turn_boost_until = 0.0
-        else:
-            self.qr_turn_boost_until = 0.0
-
-        # --- Detener movimiento y centrar dirección (como hacía la anterior) ---
+        # Seguridad: parar motores (no controlamos velocidad aquí)
         try:
-            move.stop()
-        except Exception:
-            try: move.motorStop()
-            except: pass
-        try:
-            RPIservo.move(SERVO_STEERING, STEER_CENTER)  # 90
+            move.motorStop()
         except Exception:
             pass
 
-        # --- Apagar cualquier escaneo en curso y limpiar el último resultado ---
+        # Activar overlay de cámara
         try:
+            from camera_opencv import Camera
             cam = Camera.get_instance()
-            # La vieja versión miraba cam.modeSelect; aquí apagamos modo y flags del hilo:
-            cam.modeselect('none')                            # salir de 'scanQR'
-            # por si el hilo mantuvo estado:
-            cam.cv_thread.qr_scanning = False
-            cam.cv_thread.last_qr_result = None
-        except Exception:
-            pass
+            cam.modeselect('lineBlack')
+            print("[trackLine] Modo camara 'lineBlack' activado (solo servo direccion).")
+        except Exception as e:
+            print(f"[trackLine] No se pudo activar lineBlack: {e}")
 
+        # Deshabilita por completo el flujo antiguo
+        self.camera_managed_line = True
+        self.functionMode = 'trackLine'
         self.resume()
+
 
     # ------------------ (Opcional) Maniobra QR directa — no usada en el enfoque actual ------------------
     def _execute_qr_maneuver(self, direction: str):
@@ -306,6 +285,9 @@ class Functions(threading.Thread):
         - Si no hay QR (timeout): salida por defecto (recto si centro=1, si no izquierda).
         - Activa ventana 'qr_ignore_until' para no quedarse atrapado en 111.
         """
+        time.sleep(0.05)
+        return
+
         CENTER = STEER_CENTER
         LEFT   = STEER_LEFT
         RIGHT  = STEER_RIGHT

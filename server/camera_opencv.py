@@ -10,10 +10,17 @@ import datetime
 import threading
 import imutils
 from pyzbar import pyzbar # <--- AÑADIDO
+import time
 
 # Definimos los servos aquí para que el script sea más claro
 SERVO_TILT = 0
 SERVO_PAN = 1
+SERVO_STEERING = 2  # servo de dirección (ruedas)
+
+# Calibración dirección (ajústalo a tu coche)
+STEER_CENTER = 95
+STEER_LEFT   = 130
+STEER_RIGHT  = 60
 
 class CVProcessor(threading.Thread):
     def __init__(self):
@@ -40,6 +47,79 @@ class CVProcessor(threading.Thread):
 
         self._flag = threading.Event()
         self._flag.clear()
+
+
+    def _line_black_overlay_and_steer(self, frame):
+
+        # ---------- Parámetros ajustables ----------
+        y_band = 0.60        # fracción superior de la imagen que analizamos (0.55–0.70)
+        SCALE_W = 1.00       # 1.0 = mismo ancho; >1 más ancho; <1 más estrecho
+        SCALE_H = 1.40       # 1.0 = misma altura; >1 más alto; <1 más bajo
+        BORDER_THICK = 2     # grosor del borde del recuadro (px)
+        MIN_AREA = 300       # área mínima del contorno aceptado (px^2)
+        K = 0.20             # ganancia servo (invierte el signo si gira al revés)
+        # ------------------------------------------
+
+        h, w = frame.shape[:2]
+        y1 = int(h * y_band)   # sube/baja banda si hace falta (0.55–0.70)
+        y2 = h
+        roi = frame[y1:y2, :]
+
+        # Segmentación (gris + blur + Otsu INV + morfología)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (7, 7), 0)
+        thr  = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        thr  = cv2.morphologyEx(thr, cv2.MORPH_OPEN,  np.ones((3,3), np.uint8), 1)
+        thr  = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), 1)
+
+        cv2.rectangle(frame, (0, y1), (w-1, y2-1), (0, 255, 255), 1)  # banda (amarillo)
+        center_x = w // 2
+        cv2.line(frame, (center_x, y1), (center_x, y2), (0, 255, 255), 1)
+
+        cnts = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+
+        cx = None
+        status = "no line"
+        if cnts:
+            c = max(cnts, key=cv2.contourArea)
+            x, y, ww, hh = cv2.boundingRect(c)
+            if ww * hh > MIN_AREA:
+                # ---------- Escala del recuadro (Opción A) ----------
+                pad_w = int((SCALE_W - 1.0) * ww / 2.0)
+                pad_h = int((SCALE_H - 1.0) * hh / 2.0)
+
+                x1p = max(0, x - pad_w)
+                x2p = min(w - 1, x + ww + pad_w)
+                y1p = max(y1, y1 + y - pad_h)
+                y2p = min(y2 - 1, y1 + y + hh + pad_h)
+                # ----------------------------------------------------
+
+                # Dibujo del recuadro verde
+                cv2.rectangle(frame, (x1p, y1p), (x2p, y2p), (0, 255, 0), BORDER_THICK)
+
+                # Centro horizontal del recuadro (en coords globales X)
+                cx = x + ww // 2
+                cv2.circle(frame, (cx, (y1 + y2) // 2), 4, (0, 255, 0), -1)
+
+
+        if cx is not None:
+            err = center_x - cx
+            K = 0.08  # ajusta signo/magnitud
+            target = int(STEER_CENTER + K * err)
+            target = max(STEER_RIGHT, min(STEER_LEFT, target))
+            try:
+                RPIservo.move(SERVO_STEERING, target)
+            except Exception:
+                pass
+            status = f"line OK | err={err:+d} -> servo={target}"
+        else:
+            status = f"no line | white={white_pix}"
+
+        cv2.putText(frame, f"lineBlack | {status}", (10, max(22, y1-10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (50, 220, 50), 2, cv2.LINE_AA)
+        return frame
+
 
     def scan_qr(self, frame):
         """
@@ -187,29 +267,45 @@ class CVProcessor(threading.Thread):
 
     def draw_elements_on_frame(self, frame):
         if self.mode == 'findColor':
-            if 'text' in self.drawing_elements: cv2.putText(frame, self.drawing_elements['text'], (40, 60), self.font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            if 'rect' in self.drawing_elements: x1, y1, x2, y2 = self.drawing_elements['rect']; cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        elif self.mode == 'watchDog':
-            if 'motion_rect' in self.drawing_elements: x1, y1, x2, y2 = self.drawing_elements['motion_rect']; cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if 'text' in self.drawing_elements:
+                cv2.putText(frame, self.drawing_elements['text'], (40, 60),
+                            self.font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            if 'rect' in self.drawing_elements:
+                x1, y1, x2, y2 = self.drawing_elements['rect']
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        elif self.mode == 'lineBlack':
+            frame = self._line_black_overlay_and_steer(frame)
+
         elif self.mode == 'scanQR':
             if 'qr_rect' in self.drawing_elements:
                 x1, y1, x2, y2 = self.drawing_elements['qr_rect']
                 text = self.drawing_elements.get('qr_text', '')
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, text, (x1, y1 - 10), self.font, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, text, (x1, y1 - 10),
+                            self.font, 0.7, (0, 255, 0), 2)
         return frame
 
     def run(self):
         while True:
             self._flag.wait()
-            if self.mode == 'none': self.is_processing = False; self._flag.clear(); continue
+            if self.mode == 'none':
+                self.is_processing = False
+                self._flag.clear()
+                continue
+
             self.is_processing = True
             if self.img_to_process is not None:
-                if self.mode == 'findColor': self.find_color(self.img_to_process)
-                elif self.mode == 'watchDog': self.watch_dog(self.img_to_process)
-                # --- AÑADIDO: Llamada a la función de escaneo de QR ---
-                elif self.mode == 'scanQR': self.scan_qr(self.img_to_process)
-            self.is_processing = False; self._flag.clear()
+                if self.mode == 'findColor':
+                    self.find_color(self.img_to_process)
+                elif self.mode == 'watchDog':
+                    self.watch_dog(self.img_to_process)
+                elif self.mode == 'scanQR':
+                    self.scan_qr(self.img_to_process)
+                # lineBlack: NO se procesa aquí (se hace inline en draw_elements_on_frame)
+            self.is_processing = False
+            self._flag.clear()
+
 
     def pause(self):
         self.pan_angle = 90; self.tilt_angle = 90; self.mode = 'none'; self.drawing_elements = {}; self._flag.clear()
@@ -222,12 +318,19 @@ class Camera(BaseCamera):
     _picam2_lock = threading.Lock()
 
     def __init__(self):
-        if Camera._instance is not None: raise RuntimeError("Camera is a singleton, use get_instance()")
-        super(Camera, self).__init__()
+        if Camera._instance is not None:
+            raise RuntimeError("Camera is a singleton, use get_instance()")
+
+        # Fijar singleton ANTES de arrancar el hilo de BaseCamera
+        Camera._instance = self
+
+        # Estado local
         self.modeSelect = 'none'
         self.cv_thread = CVProcessor()
         self.cv_thread.start()
-        Camera._instance = self
+
+        # Arranca el hilo que llamará a frames()
+        super(Camera, self).__init__()
 
     @classmethod
     def get_instance(cls):
@@ -243,6 +346,18 @@ class Camera(BaseCamera):
         """
         print(f"[Camera] modeselect -> {mode}")
         self.modeSelect = mode
+
+        if self.modeSelect in ('findColor', 'watchDog', 'scanQR'):
+            self.cv_thread.set_mode(self.modeSelect, None)
+        elif self.modeSelect == 'lineBlack':
+            # 🔧 IMPORTANTE: fijar el modo en el hilo para que draw_elements_on_frame()
+            # entre en la rama 'lineBlack' AUNQUE no despertemos run()
+            self.cv_thread.mode = 'lineBlack'
+            self.cv_thread.img_to_process = None  # no se usa en lineBlack
+
+        elif self.modeSelect == 'none':
+            self.cv_thread.pause()
+
 
     def start_background_feed(self):
         """
@@ -299,31 +414,60 @@ class Camera(BaseCamera):
 
     @staticmethod
     def frames():
+        # 1) Esperar a que __init__ fije el singleton
+        while Camera._instance is None:
+            time.sleep(0.01)
+        cam_instance = Camera._instance
+
+        # 2) Inicializar Picamera2 una sola vez
         try:
-            with Camera._picam2_lock:
-                if Camera._picam2 is None:
-                    from picamera2 import Picamera2
-                    print("Inicializando hardware de Picamera2 (una sola vez)...")
-                    picam2 = Picamera2()
-                    config = picam2.create_preview_configuration(main={"size": (640, 480)})
-                    picam2.configure(config)
-                    picam2.start()
-                    Camera._picam2 = picam2
-                    print("Picamera2 inicializada correctamente (singleton).")
-                else:
-                    picam2 = Camera._picam2
+            from picamera2 import Picamera2
+            if Camera._picam2 is None:
+                print("Inicializando hardware de Picamera2 (singleton).")
+                _p2 = Picamera2()
+                config = _p2.create_preview_configuration(main={"size": (640, 480)})
+                _p2.configure(config)
+                _p2.start()
+                Camera._picam2 = _p2
+                print("Picamera2 inicializada correctamente (singleton).")
+            picam2 = Camera._picam2
         except Exception as e:
             print(f"Error al iniciar Picamera2: {e}")
             error_img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(error_img, "Camera Error", (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(error_img, "Camera Error", (180, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             while True:
-                 yield cv2.imencode('.jpg', error_img)[1].tobytes()
+                yield cv2.imencode('.jpg', error_img)[1].tobytes()
 
-        cam_instance = Camera.get_instance()
+        # 3) Bucle de captura/render
         while True:
-           img_rgb = picam2.capture_array()
-           img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-           if cam_instance.modeSelect != 'none' and not cam_instance.cv_thread.is_processing:
-               cam_instance.cv_thread.set_mode(cam_instance.modeSelect, img)
-           img = cam_instance.cv_thread.draw_elements_on_frame(img)
-           yield cv2.imencode('.jpg', img)[1].tobytes()
+            try:
+                img_rgb = picam2.capture_array()
+            except Exception as e:
+                print(f"[frames] capture_array() fallo: {e}")
+                black = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(black, "Capture Error", (160, 240),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                yield cv2.imencode('.jpg', black)[1].tobytes()
+                continue
+
+            img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+            # Entregar imagen al hilo CV SOLO para modos que lo usan
+            try:
+                if (cam_instance.modeSelect in ('findColor', 'watchDog', 'scanQR')
+                    and not cam_instance.cv_thread.is_processing):
+                    cam_instance.cv_thread.set_mode(cam_instance.modeSelect, img)
+            except Exception:
+                pass
+
+            # Dibujar overlays (incluye lineBlack inline)
+            try:
+                img = cam_instance.cv_thread.draw_elements_on_frame(img)
+            except Exception:
+                pass
+
+            ok, buf = cv2.imencode('.jpg', img)
+            if not ok:
+                buf = cv2.imencode('.jpg', np.zeros_like(img))[1]
+            yield buf.tobytes()
