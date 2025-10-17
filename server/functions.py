@@ -1,177 +1,246 @@
 #!/usr/bin/python3
 # File name   : functions.py
-# Description : Control Functions using modern libraries
-# Author      : William (Adaptado por Felipe y Gemini)
-# Date        : 2025/08/28
+# Description : Control loop (servo dirección + motores) consumiendo visión (5 ventanas) de camera_opencv
+# Author      : Felipe (optimizado y modular)
 
 import time
-import RPi.GPIO as GPIO
 import threading
-import os
-import json
-import ultra
-import Kalman_filter
+
 import move
 import RPIservo
-import asyncio
 from camera_opencv import Camera
+import numpy as np  # <-- NECESARIO para np.sign
 
-# --- Definiciones de Servos (canales) ---
+# -----------------------------
+# Constantes de dirección/marcha
+# -----------------------------
 SERVO_TILT = 0
 SERVO_PAN = 1
 SERVO_STEERING = 2
 
-# --- Ángulos del SERVO de dirección (ruedas) ---
-STEER_RIGHT  = 60   # derecha
-STEER_CENTER = 90   # recto
-STEER_LEFT   = 130  # izquierda
+# Dirección (ajusta a tu coche)
+STEER_RIGHT        = 60
+STEER_CENTER       = 90   # calibra "recto" real
+STEER_LEFT         = 130
+K_STEER            = 0.08  # deg/px (invierte a -0.08 si gira al revés)
 
-# --- Inicialización de Módulos ---
-move.setup()
-kalman_filter_X = Kalman_filter.Kalman_filter(0.01, 0.1)
-line_pin_right, line_pin_middle, line_pin_left = 20, 16, 19
+# Velocidades
+DRIVE_BASE_SPEED    = 40
+DRIVE_MAX_SPEED     = 60
+MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
-MPU_connection = 1
-try:
-    from mpu6500 import mpu6500
-    sensor = mpu6500(0x68)
-    print('mpu6500 conectado.')
-except:
-    MPU_connection = 0
-    print('mpu6500 desconectado o librería no instalada. El modo "Steady" no funcionará.')
+# Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
+ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad
+ERR_STOP_THRESH_PX  = 160   # |err| > esto → casi parar
 
-def setup_line_pins():
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(line_pin_right, GPIO.IN)
-    GPIO.setup(line_pin_middle, GPIO.IN)
-    GPIO.setup(line_pin_left, GPIO.IN)
+# Parada por pérdida de línea
+NO_LINE_STOP_FRAMES = 5
+
+# Rampa y frecuencia de órdenes
+RAMP_STEP           = 7
+RAMP_HZ_LIMIT       = 12.0  # Hz máximos de envío de órdenes al motor
+
+# Depuración (sube para menos logs; 0 = silencio)
+DEBUG_DRIVE_LOG_EVERY = 0.0
+
+# --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
+WIN_WEIGHTS = [0.08, 0.12, 0.18, 0.26, 0.36]  # suma aprox 1.0; más peso abajo
+PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
+
+# --- Recortes suaves por MID/FAR (opcional) ---
+MID_ERR_SLOW_THRESH = 100
+FAR_ERR_SLOW_THRESH = 130
+CUT_MID_FRAC = 0.15  # máx 15% extra por mid
+CUT_FAR_FRAC = 0.15  # máx 15% extra por far
+
+# --- Mínimo seguro si sólo tenemos bandas superiores ---
+SAFE_MIN_WHEN_FAR_ONLY = 32
+
+# --- Pre-giro anticipado por bandas ---
+FAR_PRESTEER_DEG  = 10   # cuando SOLO far ve curva → gira ±10°
+MID_PRESTEER_DEG  = 10    # si mid también la ve → suma ±6°
+NEAR_PRESTEER_DEG = 15    # cuando near ya la ve → suma ligera (consolidación)
+
+# Limitador de velocidad de giro del servo (suaviza cambios bruscos)
+STEER_SLEW_DEG_PER_SEC = 360  # máx grados/seg que puede cambiar el servo
+
+FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
+
+ANY_BAND_MIN_SPEED = 38
+
 
 class Functions(threading.Thread):
+    """
+    Hilo de CONTROL: consume el estado de línea publicado por camera_opencv (modo 'lineBlack')
+    y gobierna servo de dirección + motores con rampa.
+    """
+
     def __init__(self, *args, **kwargs):
-        self.functionMode = 'none'
-        self.steadyGoal = 0
-        self.websocket = None
-        self.event_loop = None
-        setup_line_pins()
-
-        # --- Estado seguidor de línea / giros ---
-        self.last_turn_direction = 'none'   # 'left' | 'right' | 'center' | 'none'
-
-        # --- Estados para QR ---
-        self.awaiting_qr = False
-        self.qr_ignore_until = 0.0          # ventana para ignorar cruce tras decidir QR
-
-        self.qr_launch_ts = 0.0           # instante en el que se lanzó scanQR
-        self.qr_launch_retry_done = False # si ya hicimos un único reintento de lanzamiento
-        self.qr_turn_boost_until = 0.0
-
-        self.camera_managed_line = False  # cuando True, NO ejecutar el bucle antiguo de línea
-
-        # --- Estados para el modo automático (no usado aquí) ---
-        self.auto_state = "AVANZAR"
-        self.turn_direction = "derecha"
-        self.dist_frente = 0
-
         super(Functions, self).__init__(*args, **kwargs)
+
+        # Estado de modo/ejecución
+        self.functionMode = 'none'
+
+        # Estado del seguidor (control)
+        self.line_follow_active = False
+        self._target_speed = 0
+        self._current_speed = 0
+        self._no_line_frames = 0
+        self._last_drive_time = 0.0
+        self._line_last_seq = None
+        self._last_debug_log = 0.0
+
+        # Evento para pausar/reanudar el bucle del hilo
         self.__flag = threading.Event()
         self.__flag.clear()
 
-    # ------------------ Utilidades de RADAR (ultrasonidos con PAN) ------------------
-    def send_radar_data(self, distance, angle):
-        if self.websocket and self.event_loop:
-            try:
-                response = {'title': 'scanResult', 'data': [[distance, angle]]}
-                asyncio.run_coroutine_threadsafe(
-                    self.websocket.send(json.dumps(response)),
-                    self.event_loop
-                )
-            except Exception as e:
-                print(f"Error al enviar datos del radar: {e}")
+        self._servo_last_angle = STEER_CENTER
+        self._servo_last_time  = time.time()
 
-    def radarScan(self, step=5, dwell_ms=80, samples=3, stream=True):
-        print("Iniciando escaneo de radar...")
+
+        # Motores listos
         try:
-            RPIservo.move(SERVO_TILT, 90)
+            if hasattr(move, "setup"):
+                move.setup()
         except Exception as e:
-            print(f"[radarScan] Aviso al centrar TILT: {e}")
-        time.sleep(0.2)
+            print("[Functions] Aviso: move.setup() falló:", e)
 
-        MIN_M, MAX_M = 0.02, 4.00
-        full_scan_result = []
+    # --------------- Helpers de movimiento ---------------
 
-        forward = list(range(0, 181, step))
-        backward = list(range(180, -1, -step))
-        sweep = forward + backward[1:-1]
-
-        def trimmed_mean(values, trim=0.34):
-            if not values: return None
-            vals = sorted(v for v in values if v is not None)
-            if not vals: return None
-            k = int(len(vals) * trim)
-            vals = vals[k: len(vals) - k] if len(vals) > 2*k else vals
-            return sum(vals) / len(vals) if vals else None
-
-        for angle in sweep:
-            try:
-                RPIservo.move(SERVO_PAN, angle)
-            except Exception as e:
-                print(f"[radarScan] Error moviendo PAN a {angle}: {e}")
-            time.sleep(dwell_ms / 1000.0)
-
-            readings = []
-            for _ in range(max(1, samples)):
-                d = ultra.checkdist()
-                if d is not None and MIN_M <= d <= MAX_M:
-                    readings.append(d)
-                time.sleep(0.02)
-
-            dist = trimmed_mean(readings)
-            if dist is None:
-                continue
-
-            display_angle = 180 - angle
-            point = [dist, display_angle]
-            full_scan_result.append(point)
-
-            if stream:
-                self.send_radar_data(dist, display_angle)
-
-        time.sleep(0.2)
+    def _motor_stop(self):
         try:
-            RPIservo.move(SERVO_PAN, 90)
+            if hasattr(move, "motorStop"):
+                move.motorStop()
+            else:
+                move.stop()
+        except Exception:
+            pass
+        self._current_speed = 0
+
+    def _set_target_speed(self, spd: int):
+        spd = int(max(0, min(100, spd)))
+        self._target_speed = spd
+
+    def _ramp_and_drive(self):
+        now = time.time()
+        if now - self._last_drive_time < 1.0 / RAMP_HZ_LIMIT:
+            return
+        self._last_drive_time = now
+
+        # rampa hacia el objetivo
+        if self._current_speed < self._target_speed:
+            self._current_speed = min(self._current_speed + RAMP_STEP, self._target_speed)
+        elif self._current_speed > self._target_speed:
+            self._current_speed = max(self._current_speed - RAMP_STEP, self._target_speed)
+
+        v = int(self._current_speed)
+
+        if (not self.line_follow_active) or v <= 0:
+            self._motor_stop()
+            return
+        try:
+            move.forward(v)  # tu move.py usa forward(speed)
+        except Exception as e:
+            # Evita spam si el motor no está listo en algún ciclo
+            # print("[drive] forward() falló:", e)
+            self._motor_stop()
+
+    def _steer_from_err(self, err_px: int):
+        """
+        Mapea error de píxeles (izq:+ / der:-) a ángulo de servo.
+        'shim' de compatibilidad: simple, fiable y rápido.
+        """
+        target = int(STEER_CENTER + K_STEER * int(err_px))
+        target = max(STEER_RIGHT, min(STEER_LEFT, target))
+        try:
+            RPIservo.move(SERVO_STEERING, target)
+        except Exception:
+            pass
+        return target
+
+    def _steer_command(self, target_deg: int):
+        """
+        Aplica un limitador de pendiente (slew-rate) al servo para que no gire
+        más rápido de STEER_SLEW_DEG_PER_SEC. Devuelve el ángulo realmente enviado.
+        """
+        now = time.time()
+        dt = max(1e-3, now - self._servo_last_time)
+        max_step = STEER_SLEW_DEG_PER_SEC * dt
+
+        # clamp a los límites físicos
+        target_deg = max(STEER_RIGHT, min(STEER_LEFT, int(target_deg)))
+
+        # aplicar slew
+        delta = target_deg - self._servo_last_angle
+        if abs(delta) > max_step:
+            target_deg = int(self._servo_last_angle + max_step * (1 if delta > 0 else -1))
+
+        # enviar al servo
+        try:
+            RPIservo.move(SERVO_STEERING, target_deg)
         except Exception:
             pass
 
-        print(f"Escaneo de radar finalizado. Puntos válidos: {len(full_scan_result)}")
-        return full_scan_result
+        self._servo_last_angle = target_deg
+        self._servo_last_time  = now
+        return target_deg
 
-    # ------------------ Control de modos ------------------
+    # --------------- API de modos (llamadas desde webServer/GUI) ---------------
+
     def pause(self):
+        """
+        Detiene de forma segura cualquier modo activo:
+        - Para motores y congela rampas.
+        - Centra la dirección (si hay servo).
+        - Desactiva overlays / modos de cámara.
+        - Pone el hilo de funciones en pausa.
+        """
         self.functionMode = 'none'
-        self.websocket = None
-        self.event_loop = None
+        self.line_follow_active = False
+
+        # Parar motores (con rampa si está disponible)
         try:
-            move.stop()
+            self._set_target_speed(0)
+            self._ramp_and_drive()
         except Exception:
-            try: move.motorStop()
-            except: pass
-        # Apaga escaneo y limpia resultado al salir
+            try:
+                if hasattr(move, "motorStop"):
+                    move.motorStop()
+                else:
+                    move.stop()
+            except Exception:
+                pass
+
+        self._target_speed = 0
+        self._current_speed = 0
+        self._no_line_frames = 0
+        self._line_last_seq = None
+
+        # Centrar la dirección
+        try:
+            RPIservo.move(SERVO_STEERING, STEER_CENTER)
+        except Exception:
+            pass
+
+        # Quitar overlays / modos de cámara
         try:
             cam = Camera.get_instance()
             cam.modeselect('none')
-        #    cam.cv_thread.qr_scanning = False
-        #    cam.cv_thread.last_qr_result = None
         except Exception:
             pass
-        self.__flag.clear()
-        print("Pausando todas las funciones activas.")
 
-    def modeSet(self, mode):
-        if mode == 'trackLine':
+        # Pausar hilo
+        try:
+            self.__flag.clear()
+        except Exception:
+            pass
+
+        print("Pausa: motores OFF, cámara en 'none', dirección centrada.")
+
+    def modeSet(self, mode: str):
+        # Unifica Automatic y trackLine al mismo flujo por cámara
+        if mode in ('trackLine', 'Automatic', 'automatic'):
             self.trackLine()
-        elif mode == 'Automatic':
-            self.automatic(self.websocket, self.event_loop)
         elif mode == 'none':
             self.pause()
         else:
@@ -180,300 +249,181 @@ class Functions(threading.Thread):
     def resume(self):
         self.__flag.set()
 
-    def automatic(self, websocket, loop):
-        print("🤖 Activando modo 'Automático' con radar en vivo.")
-        self.websocket = websocket
-        self.event_loop = loop
-        self.functionMode = 'Automatic'
-        self.auto_state = "forward"
-        self.resume()
-
     def trackLine(self):
         """
-        Activa el modo de cámara 'lineBlack' (detección de línea negra con recuadro verde)
-        y NO usa sensores de línea ni QR. Solo mueve el servo de dirección desde camera_opencv.
+        Seguir línea con cámara:
+        - La cámara publica métricas (5 ventanas) en cv_thread.line_state (modo 'lineBlack').
+        - Este hilo controla servo + motores en base a dichas métricas.
         """
-        # Seguridad: parar motores (no controlamos velocidad aquí)
+        # Seguridad básica
         try:
-            move.motorStop()
+            if hasattr(move, "motorStop"):
+                move.motorStop()
+            else:
+                move.stop()
+        except Exception:
+            pass
+        try:
+            RPIservo.move(SERVO_STEERING, STEER_CENTER)
         except Exception:
             pass
 
-        # Activar overlay de cámara
+        # Activar visión
         try:
-            from camera_opencv import Camera
             cam = Camera.get_instance()
-            cam.modeselect('lineBlack')
-            print("[trackLine] Modo camara 'lineBlack' activado (solo servo direccion).")
+            cam.modeselect('lineBlack')   # visión + publicación de estado
+            print("[trackLine] Cámara en 'lineBlack'. Control en functions.py")
         except Exception as e:
             print(f"[trackLine] No se pudo activar lineBlack: {e}")
 
-        # Deshabilita por completo el flujo antiguo
-        self.camera_managed_line = True
+        # Estado de control
+        self._target_speed = 0
+        self._current_speed = 0
+        self._no_line_frames = 0
+        self._line_last_seq = None
+        self._last_debug_log = 0.0
+        self.line_follow_active = True
+
         self.functionMode = 'trackLine'
         self.resume()
 
+    # --------------- Lazo de control (se llama periódicamente desde run) ---------------
 
-    # ------------------ (Opcional) Maniobra QR directa — no usada en el enfoque actual ------------------
-    def _execute_qr_maneuver(self, direction: str):
-        """Mantener por compatibilidad; no se invoca en el enfoque 'QR como sesgo'."""
-        VELOCIDAD = 55
-        d = str(direction).strip().lower()
-        try:
-            cam = Camera.get_instance()
-            cam.modeselect('none')
-            cam.cv_thread.qr_scanning = False
-            cam.cv_thread.last_qr_result = None
-        except Exception:
-            pass
-
-        try:
-            move.stop()
-        except Exception:
-            try: move.motorStop()
-            except: pass
-        RPIservo.move(SERVO_STEERING, STEER_CENTER)
-        time.sleep(0.05)
-
-        if d in ('left', 'izquierda'):
-            RPIservo.move(SERVO_STEERING, STEER_LEFT)
-            move.forward(VELOCIDAD)
-            time.sleep(0.75)
-        elif d in ('right', 'derecha'):
-            RPIservo.move(SERVO_STEERING, STEER_RIGHT)
-            move.forward(VELOCIDAD)
-            time.sleep(0.75)
-        elif d in ('forward', 'center', 'recto'):
-            RPIservo.move(SERVO_STEERING, STEER_CENTER)
-            move.forward(VELOCIDAD)
-            time.sleep(0.6)
-
-        # No recentramos aquí a propósito
-
-    def _reset_qr_state(self):
-        """Resetea todo el estado relacionado con QR y cámara."""
-        self.awaiting_qr = False
-        self.qr_ignore_until = 0.0
-        self.qr_hold_until_exit_111 = False
-        self.qr_lock_drive_until = 0.0
-        self.qr_lock_angle = STEER_CENTER
-        self.qr_wait_deadline = 0.0
-        self.qr_launch_ts = 0.0
-        self.qr_launch_retry_done = False
-        self.qr_turn_boost_until = 0.0
-        self.last_turn_direction = 'none'
-        # Apagar modo scan en la cámara y limpiar último resultado
-        try:
-            cam = Camera.get_instance()
-            cam.modeselect('none')
-            cam.cv_thread.qr_scanning = False
-            cam.cv_thread.last_qr_result = None
-        except Exception:
-            pass
-
-
-    def automaticProcessing(self):
-        # (Tu lógica automática si la usas)
-        pass
-
-    # ------------------ Seguimiento de línea + cruces con QR ------------------
     def trackLineProcessing(self):
         """
-        - Sigue línea con 3 sensores.
-        - Se para en bifurcaciones (L y R = 1), lanza scanQR y espera hasta qr_max_wait_s.
-        - Si QR llega: mapea a 'last_turn_direction' como si fuese pérdida de línea por el lado opuesto.
-        - Si no hay QR (timeout): salida por defecto (recto si centro=1, si no izquierda).
-        - Activa ventana 'qr_ignore_until' para no quedarse atrapado en 111.
+        Dirección = mezcla ponderada de 5 ventanas + anticipación + pre-giro por bandas.
+        Velocidad = avanza SIEMPRE que al menos una banda vea línea.
         """
-        time.sleep(0.05)
-        return
-
-        CENTER = STEER_CENTER
-        LEFT   = STEER_LEFT
-        RIGHT  = STEER_RIGHT
-        VELOCIDAD = 50
-        KP = 10
-
-        # Asegurar flags para el reintento único del barrido QR
-        if not hasattr(self, 'qr_launch_ts'):
-            self.qr_launch_ts = 0.0
-        if not hasattr(self, 'qr_launch_retry_done'):
-            self.qr_launch_retry_done = False
-
-        # Estado de cámara / escaneo
+        # 1) Productor (cámara)
         try:
             cam = Camera.get_instance()
-            scanning = bool(getattr(cam.cv_thread, 'qr_scanning', False))
+            cvp = cam.cv_thread
         except Exception:
-            cam = None
-            scanning = False
-
-        # Si está escaneando, PARADO y ruedas centradas
-        if scanning:
-            try:
-                move.stop()
-            except Exception:
-                try: move.motorStop()
-                except: pass
-            RPIservo.move(SERVO_STEERING, CENTER)
-            time.sleep(0.02)
+            time.sleep(0.1)
             return
 
-        # ---------- Esperando QR (sin fallback: se queda parado) ----------
-        if self.awaiting_qr:
-            # ¿Hay resultado de QR?
-            data = None
-            try:
-                data = getattr(cam.cv_thread, 'last_qr_result', None)
-            except Exception:
-                pass
-            choice = (str(data).strip().lower() if data else '')
+        # 2) Esperar medición NUEVA
+        st, seq = cvp.get_line_state(wait_new=True, last_seq=self._line_last_seq, timeout=0.25)
+        self._line_last_seq = seq
 
-            if choice:
-                print(f"[trackLine] QR leído: {choice}")
-
-                # Cerrar escaneo y limpiar
-                try:
-                    if cam:
-                        cam.modeselect('none')
-                        cam.cv_thread.last_qr_result = None
-                        cam.cv_thread.qr_scanning = False
-                except Exception:
-                    pass
-
-                # Ventana para NO re-parar en el cruce y poder salir
-                self.qr_ignore_until = time.time() + 1.0
-                self.awaiting_qr = False
-
-                # MAPEO: usar QR de forma DIRECTA (misma dirección)
-                if ('left' in choice) or ('izquierda' in choice):
-                    self.last_turn_direction = 'left'
-                    self.qr_turn_boost_until = time.time() + 0.9   # <<— BOOST
-                    print("[trackLine] QR 'left' -> girar IZQUIERDA (last_turn_direction='left')")
-                elif ('right' in choice) or ('derecha' in choice):
-                    self.last_turn_direction = 'right'
-                    self.qr_turn_boost_until = time.time() + 0.9   # <<— BOOST
-                    print("[trackLine] QR 'right' -> girar DERECHA (last_turn_direction='right')")
-                elif ('forward' in choice) or ('center' in choice) or ('recto' in choice):
-                    self.last_turn_direction = 'center'
-                    print("[trackLine] QR 'forward' -> recto (last_turn_direction='center')")
-                else:
-                    # QR raro: quedarse parado esperando otro
-                    self.awaiting_qr = True
-                    move.stop()
-                    RPIservo.move(SERVO_STEERING, STEER_CENTER)
-                    return
-
-                return  # salimos; el seguidor aplicará el sesgo en la siguiente iteración
-
-            # No hay QR aún y NO se está escaneando: posible final de barrido sin QR o que no arrancó
-            if (not scanning) and (not self.qr_launch_retry_done):
-                # Un único reintento si han pasado >0.8 s desde el lanzamiento
-                if (time.time() - self.qr_launch_ts) > 0.8:
-                    try:
-                        if cam:
-                            cam.modeselect('scanQR')
-                            self.qr_launch_retry_done = True
-                            print("[trackLine] Reintento único de scanQR (no arrancó el barrido)")
-                    except Exception as e:
-                        print(f"[trackLine] no se pudo relanzar scanQR: {e}")
-
-            # En cualquier caso, sin QR -> PARADO y centrado
-            try:
-                move.stop()
-            except Exception:
-                try: move.motorStop()
-                except: pass
-            RPIservo.move(SERVO_STEERING, CENTER)
-            return
-        # ------------- LECTURA DE SENSORES -------------
-        s_left = GPIO.input(line_pin_left)
-        s_mid  = GPIO.input(line_pin_middle)
-        s_right= GPIO.input(line_pin_right)
-        print(f"Sensores (I-M-D): {s_left}-{s_mid}-{s_right}")
-
-        # Ventana para ignorar cruce tras decidir QR
+        # 3) Datos
         now = time.time()
-        ignore_cruce = now < getattr(self, 'qr_ignore_until', 0.0)
+        fresh = (now - st.get('timestamp', 0)) < FRESH_TIMEOUT_SEC
 
-        # ------------- DETECCIÓN DE CRUCE -------------
-        # Cruce: L y R a 1 (T o +), independientemente del centro
-        is_cruce = (s_left == 1 and s_right == 1)
+        errs = st.get('errs')        # lista 5 (0=top..4=bottom)
+        hasl = st.get('has_list')    # lista booleana 5
+        en   = st.get('err_near', st.get('err', None))
+        em   = st.get('err_mid',  None)
+        ef   = st.get('err_far',  None)
+        hn   = st.get('has_near', en is not None)
+        hm   = st.get('has_mid',  em is not None)
+        hf   = st.get('has_far',  ef is not None)
 
-        if is_cruce and not ignore_cruce:
-            move.stop()
-            RPIservo.move(SERVO_STEERING, CENTER)
+        any_band = isinstance(hasl, list) and any(hasl)
 
-            # Lanzar escaneo si aún no estamos esperando QR
-            if not self.awaiting_qr:
-                try:
-                    if cam:
-                        cam.modeselect('scanQR')
-                        print("[trackLine] scanQR lanzado en cruce (L y R = 1)")
-                    self.awaiting_qr = True
-                    self.qr_launch_ts = time.time()
-                    self.qr_launch_retry_done = False  # habilita un ÚNICO reintento si no arranca
+        # 4) Dirección base (mezcla 5 ventanas + anticipación gradiente)
+        servo_base = None
+        mix_err = None
 
-                except Exception as e:
-                    print(f"[trackLine] no se pudo lanzar scanQR: {e}")
-                return
+        if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
+            acc = 0.0; wsum = 0.0
+            for i, e in enumerate(errs):
+                if e is not None and hasl[i]:
+                    acc  += WIN_WEIGHTS[i] * float(e)
+                    wsum += WIN_WEIGHTS[i]
+            if wsum > 0:
+                mix_err = acc / wsum
+                # anticipación: diferencia bottom-top (4 - 0)
+                e_top    = float(errs[0]) if (hasl[0] and errs[0] is not None) else mix_err
+                e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
+                grad = e_bottom - e_top
+                mix_err = mix_err + PRED_GAIN * grad
+                servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
 
-            return  # parado en cruce mientras esperamos/gestionamos QR
-
-        # ------------- CONTROL PROPORCIONAL DE DIRECCIÓN -------------
-        target_angle = CENTER
-
-        if s_mid == 1 and s_left == 0 and s_right == 0:
-            target_angle = CENTER
-            self.last_turn_direction = 'center'
-
-        elif s_left == 1 and s_mid == 0:
-            target_angle = min(LEFT, CENTER + KP)
-            self.last_turn_direction = 'left'
-
-        elif s_right == 1 and s_mid == 0:
-            target_angle = max(RIGHT, CENTER - KP)
-            self.last_turn_direction = 'right'
-
-        elif s_left == 1 and s_mid == 1 and s_right == 0:
-            target_angle = min(LEFT, CENTER + (KP // 2))
-            self.last_turn_direction = 'left'
-
-        elif s_right == 1 and s_mid == 1 and s_left == 0:
-            target_angle = max(RIGHT, CENTER - (KP // 2))
-            self.last_turn_direction = 'right'
-
-        else:
-            # Línea perdida o combinación rara (incluye 000 y también 111 cuando ignore_cruce=True)
-            if self.last_turn_direction == 'left':
-                target_angle = LEFT
-            elif self.last_turn_direction == 'right':
-                target_angle = RIGHT
+        if servo_base is None and (hn or hm or hf):
+            # Fallback a near/mid/far si no hay mezcla usable
+            env = float(en) if en is not None else 0.0
+            emv = float(em) if em is not None else 0.0
+            efv = float(ef) if ef is not None else 0.0
+            if hn and hm and hf:
+                mix_err = 0.65*env + 0.20*emv + 0.15*efv
+            elif hn and hm:
+                mix_err = 0.75*env + 0.25*emv
+            elif hm and hf:
+                mix_err = 0.35*emv + 0.65*efv
             else:
-                target_angle = CENTER
+                mix_err = env if hn else (emv if hm else efv)
+            servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
 
-        # Clamp por seguridad
-        target_angle = max(RIGHT, min(LEFT, target_angle))
-        RPIservo.move(SERVO_STEERING, target_angle)
+        # 4.b) PRE-GIRO escalonado por bandas (empieza con FAR)
+        pre_bias = 0
+        if hf and ef is not None:
+            pre_bias += int(np.sign(float(ef)) * FAR_PRESTEER_DEG)
+        if hm and em is not None:
+            pre_bias += int(np.sign(float(em)) * MID_PRESTEER_DEG)
+        if hn and en is not None:
+            pre_bias += int(np.sign(float(en)) * NEAR_PRESTEER_DEG)
 
-        # ------------- AVANCE -------------
-        # Avanza solo si NO esperamos QR y NO estamos en cruce real (cuando no estamos en ventana de ignorar)
-        if (not self.awaiting_qr) and (not (is_cruce and not ignore_cruce)):
-            speed_now = 70 if time.time() < getattr(self, 'qr_turn_boost_until', 0.0) else VELOCIDAD
-            move.forward(speed_now)
-        time.sleep(0.05)
+        if servo_base is None:
+            servo_base = STEER_CENTER
 
-    # ------------------ Loop del hilo ------------------
+        servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
+        servo_pos = self._steer_command(servo_cmd)
+
+        # 5) Velocidad — AVANZA si hay al menos una banda, aunque near no esté
+        if self.line_follow_active and fresh and any_band:
+            # referencia para modular velocidad: near si existe, si no mix_err, si no 0
+            ref_err = None
+            if hn and en is not None:
+                ref_err = float(en)
+            elif mix_err is not None:
+                ref_err = float(mix_err)
+            else:
+                ref_err = 0.0
+
+            abs_ref = abs(ref_err)
+            if abs_ref >= ERR_STOP_THRESH_PX:
+                base = max(0, int(DRIVE_BASE_SPEED * 0.2))
+            else:
+                k = max(0.0, min(1.0, abs_ref / float(ERR_SLOW_THRESH_PX)))
+                base = int(DRIVE_BASE_SPEED +
+                        (DRIVE_MAX_SPEED - DRIVE_BASE_SPEED) * (1.0 - k))
+                base = max(base, MIN_MOVE_SPEED)
+
+            # recortes suaves por mid/far (opcionales)
+            cut_mid = cut_far = 0
+            if hm and em is not None:
+                k_mid = max(0.0, min(1.0, abs(float(em)) / float(MID_ERR_SLOW_THRESH)))
+                cut_mid = int(CUT_MID_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_mid)
+            if hf and ef is not None:
+                k_far = max(0.0, min(1.0, abs(float(ef)) / float(FAR_ERR_SLOW_THRESH)))
+                cut_far = int(CUT_FAR_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_far)
+
+            desired = base - (cut_mid + cut_far)
+
+            # Si NO hay NEAR pero sí otras → aseguremos avance mínimo
+            if not hn:
+                desired = max(desired, ANY_BAND_MIN_SPEED)
+
+            self._no_line_frames = 0
+            self._set_target_speed(int(max(MIN_MOVE_SPEED, desired)))
+            self._ramp_and_drive()
+        else:
+            # Sin línea: parar tras N frames
+            self._no_line_frames += 1
+            if self._no_line_frames >= NO_LINE_STOP_FRAMES:
+                self._set_target_speed(0)
+                self._ramp_and_drive()
+
+    # --------------- Bucle del hilo ---------------
+
     def functionGoing(self):
-        if self.functionMode == 'none':
-            pass
-        elif self.functionMode == 'Automatic':
-            self.automaticProcessing()
-        elif self.functionMode == 'trackLine':
+        if self.functionMode == 'trackLine':
             self.trackLineProcessing()
+        # (otros modos en el futuro)
 
     def run(self):
         while True:
-            self.__flag.wait()
+            self.__flag.wait()          # espera a que haya algún modo activo
             if self.functionMode != 'none':
                 self.functionGoing()
