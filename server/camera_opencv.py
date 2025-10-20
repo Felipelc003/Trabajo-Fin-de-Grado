@@ -345,7 +345,7 @@ class CVProcessor(threading.Thread):
         if self.draw_overlays:
             status = " ".join([f"{i}:{'OK' if has_list[i] else '--'}" for i in range(N-1, -1, -1)])
             top_text_y = max(20, bands[0][0] - 10)  # ← usa 'bands'
-            cv2.putText(frame, f"lineBlack | {status}", (10, top_text_y),
+            cv2.putText(frame, f"            lineBlack | {status}", (10, top_text_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (50, 220, 50), 2, cv2.LINE_AA)
 
         return frame
@@ -629,8 +629,9 @@ class Camera(BaseCamera):
                 print("Inicializando hardware de Picamera2 (singleton).")
                 _p2 = Picamera2()
                 # Puedes bajar a (480, 360) si necesitas más FPS
-                config = _p2.create_preview_configuration(main={"size": (640, 480)})
+                config = _p2.create_preview_configuration(main={"size": (640, 480)}, controls={"FrameRate": 60.0}, buffer_count=4)
                 _p2.configure(config)
+                _p2.set_controls({"FrameRate": 60.0})
                 _p2.start()
                 Camera._picam2 = _p2
                 print("Picamera2 inicializada correctamente (singleton).")
@@ -643,10 +644,15 @@ class Camera(BaseCamera):
             while True:
                 yield cv2.imencode('.jpg', error_img)[1].tobytes()
 
+        # --- Estado para FPS ---
+        fps_prev_t = time.time()
+        fps_ema = 0.0  # media exponencial para que no salte
+
+
         # Bucle de captura y render
         while True:
             try:
-                img_rgb = picam2.capture_array()
+                img_rgb = picam2.capture_array("main")
             except Exception as e:
                 print(f"[frames] capture_array() fallo: {e}")
                 black = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -671,8 +677,20 @@ class Camera(BaseCamera):
             except Exception:
                 pass
 
+            # --- Calcular y dibujar FPS (siempre visible) ---
+            now = time.time()
+            dt = max(1e-6, now - fps_prev_t)
+            inst_fps = 1.0 / dt
+            fps_ema = inst_fps if fps_ema == 0.0 else (0.9 * fps_ema + 0.1 * inst_fps)
+            fps_prev_t = now
+
+            # color simple por rango de FPS (opcional)
+            color = (40, 255, 40) if fps_ema >= 15 else ((40, 220, 220) if fps_ema >= 8 else (0, 0, 255))
+            cv2.putText(img, f"FPS: {fps_ema:.1f}", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+
             # JPEG (baja calidad si quieres más FPS: calidad 60)
-            ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
             if not ok:
                 buf = cv2.imencode('.jpg', np.zeros_like(img))[1]
             yield buf.tobytes()

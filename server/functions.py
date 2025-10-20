@@ -25,9 +25,9 @@ STEER_LEFT         = 130
 K_STEER            = 0.08  # deg/px (invierte a -0.08 si gira al revés)
 
 # Velocidades
-DRIVE_BASE_SPEED    = 40
-DRIVE_MAX_SPEED     = 60
-MIN_MOVE_SPEED      = 30    # vencer rozamiento
+DRIVE_BASE_SPEED    = 50
+DRIVE_MAX_SPEED     = 55
+MIN_MOVE_SPEED      = 45    # vencer rozamiento
 
 # Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
 ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad

@@ -21,7 +21,7 @@ import switch
 import app
 
 # =================== Estado global ===================
-speed_set = 80
+speed_set = 50
 direction_command = 'no'
 turn_command = 'no'
 
@@ -47,7 +47,7 @@ def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 90)
     RPIservo.move(SERVO_PAN, 90)
-    RPIservo.move(SERVO_TILT, 90)
+    RPIservo.move(SERVO_TILT, 63)
 
 def wifi_check():
     """
