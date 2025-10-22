@@ -42,6 +42,30 @@ except Exception as e:
 fuc = functions.Functions()
 fuc.start()
 
+# === Helper para compatibilidad de modos de cámara (nuevo/antiguo) ===
+def camera_mode(mode: str):
+    """
+    Puente de compatibilidad:
+      - Si la nueva cámara tiene enable_line_black(), úsala.
+      - Si tu cámara antigua tiene modeselect(), úsala como fallback.
+    """
+    try:
+        cam = Camera.get_instance()
+        # nueva API
+        if hasattr(cam, "enable_line_black"):
+            if mode in ("lineBlack", "trackLine", "automatic"):
+                cam.enable_line_black(True)
+            elif mode in ("none", "pause", "stop"):
+                cam.enable_line_black(False)
+            else:
+                # otros modos que lleve tu app (findColor/watchDog) viven en app.flask_app
+                pass
+        # legacy (por si sigue existiendo en alguna rama)
+        elif hasattr(cam, "modeselect"):
+            cam.modeselect(mode)
+    except Exception as e:
+        print(f"[camera_mode] No se pudo cambiar modo '{mode}': {e}")
+
 # =================== Utilidades ===================
 def servoPosInit():
     """Centra dirección, pan y tilt."""
@@ -264,6 +288,7 @@ async def recv_msg(websocket, path):
             # ---- Modo seguimiento de línea ----
             elif data == 'trackLine':
                 fuc.modeSet('trackLine')
+                camera_mode('trackline')
 
             # ---- Modo automático (evitación obst.) ----
             elif data == 'automatic':   # o 'command' según tu variable
@@ -272,19 +297,11 @@ async def recv_msg(websocket, path):
                     fuc.modeSet('trackLine')   # usa tu mismo mecanismo de funciones
                 except Exception as e:
                     print(f"[WS] No pude lanzar trackLine via fuc.modeSet: {e}")
-                    # Fallback directo a la cámara
-                    try:
-                        from camera_opencv import Camera
-                        cam = Camera.get_instance()
-                        cam.modeselect('lineBlack')
-                        print("[WS] Fallback OK → camera.modeselect('lineBlack').")
-                    except Exception as e2:
-                        print(f"[WS] Fallback a cámara falló: {e2}")
-
-
+                camera_mode('lineBlack')
 
             elif data == 'pauseFunctions':
                 fuc.pause()
+                camera_mode('none')
 
             # ---- Telemetría sistema ----
             elif data == 'get_info':

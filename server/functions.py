@@ -20,7 +20,7 @@ SERVO_STEERING = 2
 
 # Dirección (ajusta a tu coche)
 STEER_RIGHT        = 60
-STEER_CENTER       = 90   # calibra "recto" real
+STEER_CENTER       = 95   # calibra "recto" real
 STEER_LEFT         = 130
 K_STEER            = 0.08  # deg/px (invierte a -0.08 si gira al revés)
 
@@ -271,8 +271,14 @@ class Functions(threading.Thread):
         # Activar visión
         try:
             cam = Camera.get_instance()
-            cam.modeselect('lineBlack')   # visión + publicación de estado
+            cam.modeselect('lineBlack')
             print("[trackLine] Cámara en 'lineBlack'. Control en functions.py")
+            """
+            if hasattr(cam, "enable_line_black"):
+                cam.enable_line_black(True)
+            else: 
+                cam.modeselect('lineBlack')
+            """
         except Exception as e:
             print(f"[trackLine] No se pudo activar lineBlack: {e}")
 
@@ -286,6 +292,19 @@ class Functions(threading.Thread):
 
         self.functionMode = 'trackLine'
         self.resume()
+
+        # Pequeña tolerancia inicial: espera a la PRIMERA medición fresca
+        # para no quedarse parado si tarda 1-2 frames en publicar.
+        try:
+            cvp = Camera.get_instance().cv_thread
+            t0 = time.time()
+            while time.time() - t0 < 0.5:  # hasta 0.5s de margen
+                st, seq = cvp.get_line_state(wait_new=True, last_seq=None, timeout=0.2)
+                if (time.time() - st.get('timestamp', 0)) < FRESH_TIMEOUT_SEC:
+                    break
+        except Exception:
+            pass
+
 
     # --------------- Lazo de control (se llama periódicamente desde run) ---------------
 
