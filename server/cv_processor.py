@@ -77,16 +77,20 @@ class CVProcessor:
                     pass
 
             # drenar resultados
-            try:
-                got = False
-                while True:
+            got = False
+            st = ov = None
+            while True:
+                try:
                     st, ov = self._qout.get_nowait()
                     got = True
-                if got:
-                    self._publish_line_state(st)
-                    self._last_overlay = ov if self.draw_overlays else None
-            except Exception:
-                pass
+                except Exception:
+                    break
+
+            if got:
+                self._publish_line_state(st)
+                self._last_overlay = ov if self.draw_overlays else None
+
+
         else:
             self._last_overlay = None
 

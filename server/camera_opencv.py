@@ -63,6 +63,21 @@ class Camera(BaseCamera):
     def get_instance(cls):
         return cls()
 
+
+    @property
+    def cv_thread(self):
+        """
+        Compat con functions.py:
+        - Expone el CVProcessor
+        - Lo inicializa si aún no existe (orden de arranque seguro)
+        """
+        if self._cv is None:
+            from cv_processor import CVProcessor  # import diferido
+            self._cv = CVProcessor()
+            self._cv.draw_overlays = self._cv_overlays
+            self._cv.mode = self.modeSelect
+        return self._cv
+
     # ---------- Compat con tu servidor ----------
     def start_background_feed(self):
         """En algunas versiones el servidor llama a esto; no hace falta nada especial."""
@@ -87,23 +102,16 @@ class Camera(BaseCamera):
         - 'none' / 'pause' / 'stop'               -> enable_line_black(False)
         - 'scanQR' / 'findColor' / 'watchDog'     -> delega en app.flask_app si existe
         """
-        m = (mode or "").strip().lower()
-        if m in ("lineblack", "trackline", "automatic"):
-            self.enable_line_black(True)
-        elif m in ("none", "pause", "stop"):
-            self.enable_line_black(False)
-        elif m in ("scanqr", "findcolor", "watchdog"):
-            try:
-                import app
-                if hasattr(app, "flask_app") and hasattr(app.flask_app, "modeselect"):
-                    app.flask_app.modeselect(mode)
-            except Exception as e:
-                print(f"[Camera.modeselect] No pude delegar '{mode}' en app.flask_app: {e}")
-        else:
-            # modo desconocido: sólo guarda el nombre por compat
-            self.modeSelect = mode
-            if self._cv is not None:
-                self._cv.mode = mode
+        print(f"[Camera] modeselect -> {mode}")
+        self.modeSelect = mode
+        
+        if self.modeSelect == 'lineBlack':
+        
+            self.cv_thread.mode = 'lineBlack'
+            self.cv_thread.img_to_process = None
+        
+        elif self.modeSelect == 'none':
+            self.cv_thread.pause()
 
     @classmethod
     def modeselect_class(cls, mode: str):
