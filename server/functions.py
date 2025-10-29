@@ -22,11 +22,11 @@ SERVO_STEERING = 2
 STEER_RIGHT        = 60
 STEER_CENTER       = 95   # calibra "recto" real
 STEER_LEFT         = 130
-K_STEER            = 0.08  # deg/px (invierte a -0.08 si gira al revés)
+K_STEER            = 0.15  # deg/px (invierte a -0.08 si gira al revés)
 
 # Velocidades
-DRIVE_BASE_SPEED    = 50
-DRIVE_MAX_SPEED     = 55
+DRIVE_BASE_SPEED    = 45
+DRIVE_MAX_SPEED     = 45
 MIN_MOVE_SPEED      = 45    # vencer rozamiento
 
 # Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)

@@ -111,7 +111,7 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
     try: cv2.setNumThreads(1)
     except Exception: pass
 
-    from vision_line import run_line_black  # importa aquí (sólo en el hijo)
+    from vision_line import run_line_auto  # importa aquí (sólo en el hijo)
 
     while True:
         try:
@@ -122,7 +122,7 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
             continue
 
         try:
-            state, overlay = run_line_black(small, draw_overlays=True)
+            state, overlay = run_line_auto(small, draw_overlays=True)
         except Exception:
             h, w = small.shape[:2]
             state, overlay = ({
