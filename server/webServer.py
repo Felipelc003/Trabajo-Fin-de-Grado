@@ -26,7 +26,6 @@ turn_command = 'no'
 
 # Servo IDs (según tu PCA9685)
 SERVO_TILT = 0
-SERVO_PAN = 1
 SERVO_STEERING = 2
 
 # =================== Luces ===================
@@ -69,8 +68,7 @@ def camera_mode(mode: str):
 def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 90)
-    RPIservo.move(SERVO_PAN, 90)
-    RPIservo.move(SERVO_TILT, 63)
+    RPIservo.move(SERVO_TILT, 67)
 
 def wifi_check():
     """
@@ -222,19 +220,13 @@ def robotCtrl(command_input, response):
 
     elif command_input == 'left':
         turn_command = 'left'
-        RPIservo.move(SERVO_STEERING, 120)
+        RPIservo.move(SERVO_STEERING, 125)
         if RL: RL.front_turn_left()  # en tu clase ahora pone blanco
 
     elif command_input == 'right':
         turn_command = 'right'
-        RPIservo.move(SERVO_STEERING, 70)
+        RPIservo.move(SERVO_STEERING, 60)
         if RL: RL.front_turn_right()  # blanco
-
-    elif command_input == 'lookleft':
-        RPIservo.move(SERVO_PAN, 60)
-
-    elif command_input == 'lookright':
-        RPIservo.move(SERVO_PAN, 130)
 
     elif command_input == 'up':
         RPIservo.move(SERVO_TILT, 110)
@@ -243,8 +235,7 @@ def robotCtrl(command_input, response):
         RPIservo.move(SERVO_TILT, 65)
 
     elif command_input == 'home':
-        RPIservo.move(SERVO_PAN, 90)
-        RPIservo.move(SERVO_TILT, 85)
+        RPIservo.move(SERVO_TILT, 63)
 
 # =================== WebSocket server ===================
 async def recv_msg(websocket, path):

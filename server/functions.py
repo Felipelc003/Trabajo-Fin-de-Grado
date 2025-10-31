@@ -15,19 +15,18 @@ import numpy as np  # <-- NECESARIO para np.sign
 # Constantes de dirección/marcha
 # -----------------------------
 SERVO_TILT = 0
-SERVO_PAN = 1
 SERVO_STEERING = 2
 
 # Dirección (ajusta a tu coche)
 STEER_RIGHT        = 60
-STEER_CENTER       = 95   # calibra "recto" real
-STEER_LEFT         = 130
-K_STEER            = 0.15  # deg/px (invierte a -0.08 si gira al revés)
+STEER_CENTER       = 90   # calibra "recto" real
+STEER_LEFT         = 120
+K_STEER            = 0.10  # deg/px (invierte a -0.08 si gira al revés)
 
 # Velocidades
-DRIVE_BASE_SPEED    = 45
+DRIVE_BASE_SPEED    = 40
 DRIVE_MAX_SPEED     = 45
-MIN_MOVE_SPEED      = 45    # vencer rozamiento
+MIN_MOVE_SPEED      = 35    # vencer rozamiento
 
 # Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
 ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad
@@ -44,7 +43,8 @@ RAMP_HZ_LIMIT       = 12.0  # Hz máximos de envío de órdenes al motor
 DEBUG_DRIVE_LOG_EVERY = 0.0
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
-WIN_WEIGHTS = [0.08, 0.12, 0.18, 0.26, 0.36]  # suma aprox 1.0; más peso abajo
+# Más peso a la banda inferior (near) como pediste
+WIN_WEIGHTS = [0.05, 0.10, 0.15, 0.25, 0.45]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -57,16 +57,30 @@ CUT_FAR_FRAC = 0.15  # máx 15% extra por far
 SAFE_MIN_WHEN_FAR_ONLY = 32
 
 # --- Pre-giro anticipado por bandas ---
-FAR_PRESTEER_DEG  = 10   # cuando SOLO far ve curva → gira ±10°
-MID_PRESTEER_DEG  = 10    # si mid también la ve → suma ±6°
-NEAR_PRESTEER_DEG = 15    # cuando near ya la ve → suma ligera (consolidación)
+FAR_PRESTEER_DEG  = 6   # cuando SOLO far ve curva → gira ±10°
+MID_PRESTEER_DEG  = 6   # si mid también la ve → suma ±10°
+NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
 
 # Limitador de velocidad de giro del servo (suaviza cambios bruscos)
-STEER_SLEW_DEG_PER_SEC = 360  # máx grados/seg que puede cambiar el servo
+STEER_SLEW_DEG_PER_SEC = 120  # máx grados/seg que puede cambiar el servo
 
 FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
 
 ANY_BAND_MIN_SPEED = 38
+
+# -------- LATCH de búsqueda (cuando se pierde NEAR) --------
+SEARCH_TURN_DEG          = 18     # cuánto giro fijo meter en búsqueda
+SEARCH_DEBOUNCE_FRAMES   = 3      # frames de mejora consecutivos para soltar latch
+SEARCH_HYST_PX           = 1.0    # histéresis (px) para considerar "mejora" de |err|
+
+# Pesos de fallback near/mid/far (si no podemos mezclar 5)
+NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
+
+# --- Suavizado del error ---
+ERR_EMA_ALPHA     = 0.25   # 0..1 (más alto = responde más rápido)
+ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
+TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
+USE_TANH_SHAPING  = True   # activa compresión no lineal del error
 
 
 class Functions(threading.Thread):
@@ -97,6 +111,13 @@ class Functions(threading.Thread):
         self._servo_last_angle = STEER_CENTER
         self._servo_last_time  = time.time()
 
+        # -------- Estado para el latch de búsqueda --------
+        self.last_near_err  = None       # último err_near válido
+        self.last_near_side = None       # 'left' | 'right' | None
+        self.search_latch   = None       # 'left' | 'right' | None
+        self.search_debounce = 0         # frames de mejora hacia el centro
+
+        self._err_ema = None   # último error filtrado para la mezcla
 
         # Motores listos
         try:
@@ -184,6 +205,33 @@ class Functions(threading.Thread):
         self._servo_last_angle = target_deg
         self._servo_last_time  = now
         return target_deg
+
+    def _filter_mix_err(self, err):
+        """
+        Aplica deadband, EMA y compresión suave (tanh) al error combinado.
+        """
+        if err is None:
+            return None
+
+        # Deadband: elimina micro-oscilaciones
+        if abs(err) < ERR_DEADBAND_PX:
+            err = 0.0
+
+        # EMA (suavizado exponencial)
+        if self._err_ema is None:
+            self._err_ema = float(err)
+        else:
+            a = ERR_EMA_ALPHA
+            self._err_ema = (1.0 - a) * self._err_ema + a * float(err)
+        e = self._err_ema
+
+        # Compresión no lineal (evita órdenes extremas de golpe)
+        if USE_TANH_SHAPING and TANH_SCALE_PX > 1:
+            e = TANH_SCALE_PX * np.tanh(e / float(TANH_SCALE_PX))
+
+        return e
+
+
 
     # --------------- API de modos (llamadas desde webServer/GUI) ---------------
 
@@ -273,12 +321,6 @@ class Functions(threading.Thread):
             cam = Camera.get_instance()
             cam.modeselect('lineBlack')
             print("[trackLine] Cámara en 'lineBlack'. Control en functions.py")
-            """
-            if hasattr(cam, "enable_line_black"):
-                cam.enable_line_black(True)
-            else: 
-                cam.modeselect('lineBlack')
-            """
         except Exception as e:
             print(f"[trackLine] No se pudo activar lineBlack: {e}")
 
@@ -290,11 +332,17 @@ class Functions(threading.Thread):
         self._last_debug_log = 0.0
         self.line_follow_active = True
 
+        # Reset latch
+        self.last_near_err = None
+        self.last_near_side = None
+        self.search_latch = None
+        self.search_debounce = 0
+        self._err_ema = None
+
         self.functionMode = 'trackLine'
         self.resume()
 
         # Pequeña tolerancia inicial: espera a la PRIMERA medición fresca
-        # para no quedarse parado si tarda 1-2 frames en publicar.
         try:
             cvp = Camera.get_instance().cv_thread
             t0 = time.time()
@@ -312,6 +360,8 @@ class Functions(threading.Thread):
         """
         Dirección = mezcla ponderada de 5 ventanas + anticipación + pre-giro por bandas.
         Velocidad = avanza SIEMPRE que al menos una banda vea línea.
+        Con latch de búsqueda: si se pierde NEAR, gira hacia el último lado visto
+        hasta que NEAR reaparezca y su |error| empiece a bajar.
         """
         # 1) Productor (cámara)
         try:
@@ -340,54 +390,94 @@ class Functions(threading.Thread):
 
         any_band = isinstance(hasl, list) and any(hasl)
 
-        # 4) Dirección base (mezcla 5 ventanas + anticipación gradiente)
+        # 3.a) Actualizar "último lado" visto por NEAR
+        # Recordatorio: err = center_x - cx  → err>0 => línea a la IZQUIERDA (cx a la izquierda)
+        if hn and en is not None:
+            self.last_near_side = 'left' if float(en) > 0 else 'right'
+
+        # 3.b) Lógica de LATCH de búsqueda
+        # Activa latch cuando NO hay NEAR, usando last_near_side
+        if not hn and self.search_latch is None and self.last_near_side in ('left', 'right'):
+            self.search_latch = self.last_near_side
+            self.search_debounce = 0
+
+        # Si hay NEAR y estamos en latch, soltamos sólo cuando |err_near| mejora durante N frames
+        if hn and self.search_latch is not None and en is not None and self.last_near_err is not None:
+            if abs(float(en)) < abs(float(self.last_near_err)) - SEARCH_HYST_PX:
+                self.search_debounce += 1
+            else:
+                self.search_debounce = 0
+            if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
+                self.search_latch = None
+                self.search_debounce = 0
+
+        # 4) Dirección base
         servo_base = None
         mix_err = None
 
-        if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
-            acc = 0.0; wsum = 0.0
-            for i, e in enumerate(errs):
-                if e is not None and hasl[i]:
-                    acc  += WIN_WEIGHTS[i] * float(e)
-                    wsum += WIN_WEIGHTS[i]
-            if wsum > 0:
-                mix_err = acc / wsum
-                # anticipación: diferencia bottom-top (4 - 0)
-                e_top    = float(errs[0]) if (hasl[0] and errs[0] is not None) else mix_err
-                e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
-                grad = e_bottom - e_top
-                mix_err = mix_err + PRED_GAIN * grad
+        # 4.a) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
+        if self.search_latch is not None:
+            # Signo: steer>0 izquierda, steer<0 derecha
+            steer_bias_deg = (+SEARCH_TURN_DEG) if self.search_latch == 'left' else (-SEARCH_TURN_DEG)
+            servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, STEER_CENTER + int(steer_bias_deg)))
+            servo_pos = self._steer_command(servo_cmd)
+        else:
+            # 4.b) Dirección por mezcla de 5 ventanas con pesos WIN_WEIGHTS
+            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
+                acc = 0.0; wsum = 0.0
+                for i, e in enumerate(errs):
+                    if e is not None and hasl[i]:
+                        acc  += WIN_WEIGHTS[i] * float(e)
+                        wsum += WIN_WEIGHTS[i]
+                if wsum > 0:
+                    mix_err = acc / wsum
+                    # anticipación: diferencia bottom-top (4 - 0)
+                    e_top    = float(errs[0]) if (hasl[0] and errs[0] is not None) else mix_err
+                    e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
+                    grad = e_bottom - e_top
+                    mix_err = mix_err + PRED_GAIN * grad
+                    mix_err = self._filter_mix_err(mix_err)
+                    servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
+
+            if servo_base is None and (hn or hm or hf):
+                # Fallback a near/mid/far si no hay mezcla usable (con pesos fuertes a NEAR)
+                env = float(en) if (hn and en is not None) else None
+                emv = float(em) if (hm and em is not None) else None
+                efv = float(ef) if (hf and ef is not None) else None
+
+                acc = 0.0
+                wsum = 0.0
+                if env is not None:
+                    acc  += NEAR_W * env
+                    wsum += NEAR_W
+                if emv is not None:
+                    acc  += MID_W * emv
+                    wsum += MID_W
+                if efv is not None:
+                    acc  += FAR_W * efv
+                    wsum += FAR_W
+
+                mix_err = (acc / wsum) if wsum > 0 else 0.0
+
+                # <<< suavizado del error: deadband + EMA + (opcional) tanh >>>
+                mix_err = self._filter_mix_err(mix_err)
+
                 servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
 
-        if servo_base is None and (hn or hm or hf):
-            # Fallback a near/mid/far si no hay mezcla usable
-            env = float(en) if en is not None else 0.0
-            emv = float(em) if em is not None else 0.0
-            efv = float(ef) if ef is not None else 0.0
-            if hn and hm and hf:
-                mix_err = 0.65*env + 0.20*emv + 0.15*efv
-            elif hn and hm:
-                mix_err = 0.75*env + 0.25*emv
-            elif hm and hf:
-                mix_err = 0.35*emv + 0.65*efv
-            else:
-                mix_err = env if hn else (emv if hm else efv)
-            servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
+            # 4.c) PRE-GIRO escalonado por bandas (empieza con FAR)
+            pre_bias = 0
+            if hf and ef is not None:
+                pre_bias += int(np.sign(float(ef)) * FAR_PRESTEER_DEG)
+            if hm and em is not None:
+                pre_bias += int(np.sign(float(em)) * MID_PRESTEER_DEG)
+            if hn and en is not None:
+                pre_bias += int(np.sign(float(en)) * NEAR_PRESTEER_DEG)
 
-        # 4.b) PRE-GIRO escalonado por bandas (empieza con FAR)
-        pre_bias = 0
-        if hf and ef is not None:
-            pre_bias += int(np.sign(float(ef)) * FAR_PRESTEER_DEG)
-        if hm and em is not None:
-            pre_bias += int(np.sign(float(em)) * MID_PRESTEER_DEG)
-        if hn and en is not None:
-            pre_bias += int(np.sign(float(en)) * NEAR_PRESTEER_DEG)
+            if servo_base is None:
+                servo_base = STEER_CENTER
 
-        if servo_base is None:
-            servo_base = STEER_CENTER
-
-        servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
-        servo_pos = self._steer_command(servo_cmd)
+            servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
+            servo_pos = self._steer_command(servo_cmd)
 
         # 5) Velocidad — AVANZA si hay al menos una banda, aunque near no esté
         if self.line_follow_active and fresh and any_band:
@@ -433,6 +523,10 @@ class Functions(threading.Thread):
             if self._no_line_frames >= NO_LINE_STOP_FRAMES:
                 self._set_target_speed(0)
                 self._ramp_and_drive()
+
+        # 6) Memorias para próxima iteración
+        if hn and en is not None:
+            self.last_near_err = float(en)
 
     # --------------- Bucle del hilo ---------------
 
