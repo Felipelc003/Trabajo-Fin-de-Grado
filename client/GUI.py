@@ -27,6 +27,17 @@ steering_state, camera_pan_state, camera_tilt_state = 'center', 'stop', 'stop'
 # --- NUEVAS VARIABLES DE TKINTER PARA LOS DATOS ---
 cpu_temp_var, cpu_use_var, ram_use_var = None, None, None
 
+# --- Estado para FindColor/HSV ---
+hsv_mode = False
+hsv_windows_created = False
+
+# Valores por defecto para los sliders
+hsv_init = {
+    "H_min": 0, "S_min": 0, "V_min": 0,
+    "H_max": 179, "S_max": 255, "V_max": 255,
+}
+
+
 def global_init():
     global DS_stu, TS_stu, color_bg, color_text, color_btn, color_line, color_can, color_oval, target_color
     global speed, ip_stu, Switch_3, Switch_2, Switch_1, servo_stu, function_stu
@@ -39,6 +50,57 @@ global_init()
 # --- Lógica de Websockets ---
 websocket = None
 event_loop = None
+
+def _hsv_create_windows():
+    global hsv_windows_created
+    if hsv_windows_created:
+        return
+    try:
+        cv2.namedWindow("Controls")
+        cv2.resizeWindow("Controls", 500, 300)
+        cv2.createTrackbar("H_min", "Controls", hsv_init["H_min"], 179, lambda x: None)
+        cv2.createTrackbar("S_min", "Controls", hsv_init["S_min"], 255, lambda x: None)
+        cv2.createTrackbar("V_min", "Controls", hsv_init["V_min"], 255, lambda x: None)
+        cv2.createTrackbar("H_max", "Controls", hsv_init["H_max"], 179, lambda x: None)
+        cv2.createTrackbar("S_max", "Controls", hsv_init["S_max"], 255, lambda x: None)
+        cv2.createTrackbar("V_max", "Controls", hsv_init["V_max"], 255, lambda x: None)
+        hsv_windows_created = True
+        print("[HSV] Ventanas 'Controls' y 'Mask' listas. Ajusta los deslizadores; pulsa 'q' en la ventana de vídeo para imprimir los valores actuales.")
+    except Exception as e:
+        print(f"[HSV] Error creando ventanas: {e}")
+
+def _hsv_destroy_windows():
+    global hsv_windows_created
+    if not hsv_windows_created:
+        return
+    try:
+        cv2.destroyWindow("Controls")
+    except Exception:
+        pass
+    try:
+        cv2.destroyWindow("Mask")
+    except Exception:
+        pass
+    hsv_windows_created = False
+    print("[HSV] Ventanas cerradas.")
+
+def _hsv_get_range():
+    if not hsv_windows_created:
+        return (0,0,0,179,255,255)
+    h_min = cv2.getTrackbarPos("H_min", "Controls")
+    s_min = cv2.getTrackbarPos("S_min", "Controls")
+    v_min = cv2.getTrackbarPos("V_min", "Controls")
+    h_max = cv2.getTrackbarPos("H_max", "Controls")
+    s_max = cv2.getTrackbarPos("S_max", "Controls")
+    v_max = cv2.getTrackbarPos("V_max", "Controls")
+    return (h_min, s_min, v_min, h_max, s_max, v_max)
+
+def _hsv_enable(flag: bool):
+    """Solo cambia el flag. La creación/destrucción real se hace en el hilo de vídeo."""
+    global hsv_mode
+    hsv_mode = bool(flag)
+    print(f"[HSV] Modo {'activado' if hsv_mode else 'desactivado'}.")
+
 
 def send_command(command):
     if websocket and websocket.state == websockets.protocol.State.OPEN:
@@ -58,9 +120,37 @@ def show_video_stream(ip_address):
             cap.release()
             cap = cv2.VideoCapture(video_url)
             continue
+        
+        if hsv_mode:
+            if not hsv_windows_created:
+                _hsv_create_windows()
+
+            # Leer rango actual desde los sliders
+            h_min, s_min, v_min, h_max, s_max, v_max = _hsv_get_range()
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            lower = np.array([h_min, s_min, v_min], dtype=np.uint8)
+            upper = np.array([h_max, s_max, v_max], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper)
+            cv2.imshow("Mask", mask)
+        else:
+            # Si salimos del modo HSV, cierra ventanas auxiliares
+            if hsv_windows_created:
+                _hsv_destroy_windows()
+
         cv2.imshow("PiCar-B Stream", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q') or websocket is None:
+        key = cv2.waitKey(1) & 0xFF
+
+        if hsv_mode and key == ord('q'):
+            h_min, s_min, v_min, h_max, s_max, v_max = _hsv_get_range()
+            print("\n--- RANGO HSV ACTUAL ---")
+            print(f"color_lower = np.array([{h_min}, {s_min}, {v_min}], dtype=np.uint8)")
+            print(f"color_upper = np.array([{h_max}, {s_max}, {v_max}], dtype=np.uint8)")
+            print("------------------------")
+
+        # Salida general (si cierras el WS o pulsas la X de OpenCV)
+        if key == 27 or websocket is None:  # ESC o desconexión
             break
+
     print("Stream de vídeo detenido.")
     cap.release()
     cv2.destroyAllWindows()
@@ -81,6 +171,10 @@ async def network_loop(ip_address, port):
             print("Conectado al servidor websocket!")
             l_ip_4.config(text='Connected', bg='#558B2F'); l_ip_5.config(text=f'IP:{ip_address}')
             E1.config(state='disabled'); Btn14.config(state='disabled'); ip_stu=0
+            with open("last_ip.txt", "w") as f:
+                f.write(ip_address)
+
+
             
             video_thread = threading.Thread(target=show_video_stream, args=(ip_address,), daemon=True)
             video_thread.start()
@@ -226,7 +320,15 @@ def toggle_function(button_widget, start_command, stop_command):
         for btn in motor_controls + servo_controls: btn.config(state='disabled')
 
 def call_function_1(event): send_command('scan')
-def call_function_2(event): toggle_function(Btn_function_2, 'findColor', 'stopCV')
+def call_function_2(event):
+    # Enciende/apaga lógica en la Pi y sincroniza el picker local
+    toggle_function(Btn_function_2, 'findColor', 'stopCV')
+    # Tras toggle_function, si el botón activo es el de FindColor, estamos en ON
+    if function_button_active == Btn_function_2:
+        _hsv_enable(True)
+    else:
+        _hsv_enable(False)
+        
 def call_function_3(event): toggle_function(Btn_function_3, 'motionGet', 'stopCV')
 def call_function_4(event): toggle_function(Btn_function_4, 'trackLine', 'pauseFunctions')
 def call_function_5(event): toggle_function(Btn_function_5, 'automatic', 'pauseFunctions')
@@ -282,7 +384,7 @@ def update_color_swatch(event=None):
 # --- Creación de la Interfaz Gráfica ---
 def loop():
     global root, cpu_temp_var, cpu_use_var, ram_use_var, var_Speed, var_R_L, var_G_L, var_B_L, var_0, var_1, var_2, var_lip1, var_lip2, var_err, var_R, var_G, var_B, var_ec, Btn_Switch_1, Btn_Switch_2, Btn_Switch_3, E1, Btn14, l_ip_4, l_ip_5, Btn_function_2, Btn_function_3, Btn_function_4, Btn_function_5, canvas_show
-    root = tk.Tk(); root.title('PiCar-B v2.0 GUI'); root.geometry('565x850'); root.config(bg=color_bg)
+    root = tk.Tk(); root.title('TFG'); root.geometry('665x300'); root.config(bg=color_bg)
     var_Speed=tk.StringVar(); var_Speed.set(100); var_R_L=tk.StringVar(); var_R_L.set(0); var_G_L=tk.StringVar(); var_G_L.set(0); var_B_L=tk.StringVar(); var_B_L.set(0)
     var_R=tk.StringVar(); var_R.set(80); var_G=tk.StringVar(); var_G.set(80); var_B=tk.StringVar(); var_B.set(80); var_0=tk.StringVar(); var_0.set(300)
     var_1=tk.StringVar(); var_1.set(300); var_2=tk.StringVar(); var_2.set(300); var_lip1=tk.StringVar(); var_lip1.set(440); var_lip2=tk.StringVar(); var_lip2.set(380)
@@ -293,9 +395,19 @@ def loop():
     cpu_temp_var = tk.StringVar(value="N/A")
     cpu_use_var = tk.StringVar(value="N/A")
     ram_use_var = tk.StringVar(value="N/A")
-    motor_buttons(30,105); information_screen(380,15); connent_input(125,15); switch_button(30,195); servo_buttons(255,195); scale(30,230,203)
-    scale_RGB(370,280,172); scale_PWM(370,400,172); ultrasonic_radar(30,290); function_buttons(550,15); scale_FL(30,550,320)
-    scale_FC(30,650,320); scale_ExpCom(30,770,320)
+    motor_buttons(30,105); information_screen(380,15); connent_input(125,15) 
+    
+    try:
+        with open("last_ip.txt") as f:
+            last = f.read().strip()
+            if last:
+                E1.insert(0, last)
+    except FileNotFoundError:
+        pass
+    
+    switch_button(30,195); servo_buttons(255,195); scale(30,230,203); function_buttons(550,15)
+    #scale_RGB(370,280,172); scale_PWM(370,400,172); ultrasonic_radar(30,290);  scale_FL(30,550,320)
+    #scale_FC(30,650,320); scale_ExpCom(30,770,320)
     root.mainloop()
 
 def motor_buttons(x,y):
@@ -383,10 +495,12 @@ def function_buttons(x,y):
     Btn_function_5.bind('<ButtonPress-1>', call_function_5); Btn_function_7.bind('<ButtonPress-1>', call_function_7)
 def scale(x,y,w):
 	tk.Scale(root,label=None,from_=60,to=100,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=10,variable=var_Speed,troughcolor='#448AFF',command=speed_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
+
 def scale_RGB(x,y,w):
 	tk.Scale(root,label=None,from_=0,to=255,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_R_L,troughcolor='#F44336',command=R_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
 	tk.Scale(root,label=None,from_=0,to=255,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_G_L,troughcolor='#4CAF50',command=G_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y+30)
 	tk.Scale(root,label=None,from_=0,to=255,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_B_L,troughcolor='#2979FF',command=B_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y+60)
+"""
 def scale_PWM(x,y,w):
 	tk.Scale(root,label=None,from_=200,to=400,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_0,troughcolor='#212121',command=pwm0_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
 	tk.Scale(root,label=None,from_=200,to=400,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_1,troughcolor='#212121',command=pwm1_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y+30)
@@ -419,6 +533,7 @@ def scale_FL(x,y,w):
 	Btn_Render = tk.Button(root, width=10, text='Render',fg=color_text,bg='#212121',relief='ridge'); Btn_Render.place(x=x+w+111,y=y+20); Btn_Render.bind('<ButtonPress-1>', call_Render)
 	Btn_CVFL = tk.Button(root, width=10, text='CV FL',fg=color_text,bg='#212121',relief='ridge'); Btn_CVFL.place(x=x+w+21,y=y+20); Btn_CVFL.bind('<ButtonPress-1>', call_CVFL)
 	Btn_WB = tk.Button(root, width=23, text='LineColorSwitch',fg=color_text,bg='#212121',relief='ridge'); Btn_WB.place(x=x+w+21,y=y+60); Btn_WB.bind('<ButtonPress-1>', call_WB)
+
 def scale_FC(x,y,w):
 	global canvas_show
 	tk.Scale(root,label=None,from_=0,to=255,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_R,troughcolor='#FF1744',command=update_color_swatch,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
@@ -429,6 +544,6 @@ def scale_FC(x,y,w):
 def scale_ExpCom(x,y,w):
 	tk.Scale(root,label='Exposure Compensation Level', from_=-25,to=25,orient=tk.HORIZONTAL,length=w,showvalue=1,tickinterval=None,resolution=1,variable=var_ec,troughcolor='#212121',command=EC_send,fg=color_text,bg=color_bg,highlightthickness=0).place(x=x,y=y)
 	Btn_dEC = tk.Button(root, width=23,height=2, text='Set Default Exposure\nCompensation Level',fg=color_text,bg='#212121',relief='ridge'); Btn_dEC.place(x=x+w+21,y=y+3); Btn_dEC.bind('<ButtonPress-1>', EC_default)
-
+"""
 if __name__ == '__main__':
     loop()
