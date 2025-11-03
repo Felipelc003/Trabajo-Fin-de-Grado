@@ -10,20 +10,15 @@ import time
 # Perfiles HSV + Otsu (para wrappers)
 # ==========================
 BLACK_PROFILE = {
-    "hsv_lower": (28, 0, 0),
-    "hsv_upper": (179, 187, 73),
+    "hsv_lower": (0, 0, 0),
+    "hsv_upper": (179, 255, 89),
     "otsu_invert": True,
 }
 
 WHITE_PROFILE = {
-    """
-    "hsv_lower": (117, 0, 162),
+    "hsv_lower": (91, 0, 171),
     "hsv_upper": (179, 255, 255),
     "otsu_invert": False,
-    """
-    "hsv_lower": (28, 0, 0),
-    "hsv_upper": (179, 187, 73),
-    "otsu_invert": True,
 
 }
 
