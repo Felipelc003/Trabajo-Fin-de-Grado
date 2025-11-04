@@ -10,24 +10,30 @@ import time
 # Perfiles HSV + Otsu (para wrappers)
 # ==========================
 BLACK_PROFILE = {
-    "hsv_lower": (0, 0, 0),
-    "hsv_upper": (179, 255, 89),
+    "hsv_lower": (106, 0, 0),
+    "hsv_upper": (179, 255, 71),
     "otsu_invert": True,
 }
 
 WHITE_PROFILE = {
-    "hsv_lower": (91, 0, 171),
+    "hsv_lower": (99, 0, 225),
     "hsv_upper": (179, 255, 255),
     "otsu_invert": False,
-
 }
+"""
+RED_PROFILE = {
+    "hsv_lower": (171, 89, 225),
+    "hsv_upper": (179, 255, 163),
+    "otsu_invert": False,
+}
+"""
 
 # ==========================
 # Parámetros por bandas
 # ==========================
 Y_FRACS = [(0.00, 0.20), (0.20, 0.40), (0.40, 0.60), (0.60, 0.80), (0.80, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, False, False, False, True]
+BAND_ENABLED = [False, False, False, True, False]
 MIN_AREAS = [140, 160, 180, 200, 220]
 KERNEL_SIZES = [3, 3, 3, 3, 3]
 
@@ -101,7 +107,7 @@ def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False
     yT = _clamp(int(cy - box_h // 2), y1, y2 - 1)
     yB = _clamp(int(cy + box_h // 2), y1, y2 - 1)
     if filled:
-        _fill_rect_alpha(overlay, (xL, yT), (xR, yB), color, alpha=alpha)
+        _fill_rect_alpha(overlay, (xL, yT), (xR, yB), color, alpha=0.25)
     cv2.rectangle(overlay, (xL, yT), (xR, yB), color, ROW_THICK)
 
 # ==========================

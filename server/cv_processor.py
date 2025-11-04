@@ -88,17 +88,23 @@ class CVProcessor:
 
             if got:
                 self._publish_line_state(st)
+                # guardamos overlay solo si queremos dibujarlo
                 self._last_overlay = ov if self.draw_overlays else None
-
 
         else:
             self._last_overlay = None
 
+        # === RENDER ===
+        # Si tenemos overlay (ya es el frame BGR con los cuadrados encima), lo usamos DIRECTO.
+        # ¡Importante!: Nada de addWeighted aquí para evitar "lavar/blanquear" la imagen.
         if self._last_overlay is not None:
             try:
-                ov = cv2.resize(self._last_overlay, (frame_bgr.shape[1], frame_bgr.shape[0]),
-                                interpolation=cv2.INTER_NEAREST)
-                frame_bgr = cv2.addWeighted(frame_bgr, 1.0, ov, 0.8, 0.0)
+                ov = cv2.resize(
+                    self._last_overlay,
+                    (frame_bgr.shape[1], frame_bgr.shape[0]),
+                    interpolation=cv2.INTER_LINEAR
+                )
+                frame_bgr = ov
             except Exception:
                 pass
 
@@ -122,6 +128,7 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
             continue
 
         try:
+            # Pedimos a vision_line que pinte los cuadrados sobre una COPIA del frame (BGR)
             state, overlay = run_line_auto(small, draw_overlays=True)
         except Exception:
             h, w = small.shape[:2]
