@@ -27,6 +27,10 @@ steering_state, camera_pan_state, camera_tilt_state = 'center', 'stop', 'stop'
 # --- NUEVAS VARIABLES DE TKINTER PARA LOS DATOS ---
 cpu_temp_var, cpu_use_var, ram_use_var = None, None, None
 
+# Control del hilo de vídeo
+video_thread = None
+video_stop_event = None
+
 # --- Estado para FindColor/HSV ---
 hsv_mode = False
 hsv_windows_created = False
@@ -108,52 +112,105 @@ def send_command(command):
     else:
         print("No conectado, no se puede enviar el comando.")
 
-def show_video_stream(ip_address):
+def show_video_stream(ip_address, stop_event):
     video_url = f"http://{ip_address}:5000/video_feed"
     print(f"📹 Intentando conectar al stream de vídeo en: {video_url}")
-    cap = cv2.VideoCapture(video_url)
-    while True:
+
+    window_name = "PiCar-B Stream"
+    window_created = False
+    cap = None
+    first_size_set = False  # solo si usas WINDOW_NORMAL
+
+    while not stop_event.is_set():
+        # (Re)abrir captura si hace falta
+        if cap is None or not cap.isOpened():
+            try:
+                if cap is not None:
+                    cap.release()
+                cap = cv2.VideoCapture(video_url)
+            except Exception:
+                cap = None
+
+            # Espera breve a que abra
+            t0 = time.time()
+            while (cap is None or not cap.isOpened()) and (time.time() - t0 < 3.0) and not stop_event.is_set():
+                time.sleep(0.1)
+                if cap is not None and not cap.isOpened():
+                    cap.open(video_url)
+            if cap is None or not cap.isOpened():
+                time.sleep(0.5)
+                continue
+
         ret, frame = cap.read()
         if not ret:
-            print("No se pudo recibir el fotograma. Reintentando conexión...")
-            time.sleep(1)
+            time.sleep(0.2)
+            # fuerza reintento limpio
             cap.release()
-            cap = cv2.VideoCapture(video_url)
+            cap = None
             continue
-        
+
+        # --- CREACIÓN/CONFIGURACIÓN DE VENTANA ---
+        if not window_created:
+            # Opción A: grande como el frame (comportamiento anterior)
+            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+
+            # Si prefieres poder redimensionar a mano, usa en su lugar:
+            # cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            # h, w = frame.shape[:2]
+            # cv2.resizeWindow(window_name, w, h)  # igual al frame
+            # first_size_set = True
+
+            window_created = True
+
+        # --- HSV (si activo) ---
         if hsv_mode:
             if not hsv_windows_created:
                 _hsv_create_windows()
-
-            # Leer rango actual desde los sliders
             h_min, s_min, v_min, h_max, s_max, v_max = _hsv_get_range()
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             lower = np.array([h_min, s_min, v_min], dtype=np.uint8)
             upper = np.array([h_max, s_max, v_max], dtype=np.uint8)
             mask = cv2.inRange(hsv, lower, upper)
+            # Asegura que la ventana de máscara existe y se ve grande
+            try:
+                cv2.namedWindow("Mask", cv2.WINDOW_AUTOSIZE)
+            except Exception:
+                pass
             cv2.imshow("Mask", mask)
         else:
-            # Si salimos del modo HSV, cierra ventanas auxiliares
             if hsv_windows_created:
                 _hsv_destroy_windows()
 
-        cv2.imshow("PiCar-B Stream", frame)
-        key = cv2.waitKey(1) & 0xFF
+        # Mostrar frame
+        cv2.imshow(window_name, frame)
 
+        # Teclas
+        key = cv2.waitKey(1) & 0xFF
         if hsv_mode and key == ord('q'):
             h_min, s_min, v_min, h_max, s_max, v_max = _hsv_get_range()
             print("\n--- RANGO HSV ACTUAL ---")
             print(f"color_lower = np.array([{h_min}, {s_min}, {v_min}], dtype=np.uint8)")
             print(f"color_upper = np.array([{h_max}, {s_max}, {v_max}], dtype=np.uint8)")
             print("------------------------")
-
-        # Salida general (si cierras el WS o pulsas la X de OpenCV)
-        if key == 27 or websocket is None:  # ESC o desconexión
+        if key == 27:  # ESC
+            stop_event.set()
             break
 
-    print("Stream de vídeo detenido.")
-    cap.release()
-    cv2.destroyAllWindows()
+    # --- Limpieza ---
+    print("[VIDEO] Stream de vídeo detenido.")
+    try:
+        if cap is not None:
+            cap.release()
+    except Exception:
+        pass
+    try:
+        cv2.destroyWindow(window_name)
+        cv2.destroyWindow("Mask")
+        cv2.destroyWindow("Controls")
+        cv2.waitKey(1)  # procesa destrucción
+    except Exception:
+        pass
+    _hsv_destroy_windows()
 
 # --- NUEVA FUNCIÓN PARA PEDIR DATOS PERIÓDICAMENTE ---
 def request_system_info():
@@ -174,10 +231,19 @@ async def network_loop(ip_address, port):
             with open("last_ip.txt", "w") as f:
                 f.write(ip_address)
 
-
-            
-            video_thread = threading.Thread(target=show_video_stream, args=(ip_address,), daemon=True)
+            # Reinicia limpiamente el hilo de vídeo antes de crear otro
+            global video_thread, video_stop_event
+            try:
+                if video_stop_event is not None:
+                    video_stop_event.set()
+                    if video_thread and video_thread.is_alive():
+                        video_thread.join(timeout=1.0)
+            except Exception:
+                pass
+            video_stop_event = threading.Event()
+            video_thread = threading.Thread(target=show_video_stream, args=(ip_address, video_stop_event), daemon=True)
             video_thread.start()
+
             
             await websocket.send("admin:123456")
 
@@ -207,10 +273,42 @@ async def network_loop(ip_address, port):
     except Exception as e:
         print(f"Error en el bucle de red: {e}")
     finally:
-        websocket = None; ip_stu = 1; l_ip_4.config(text='Disconnected', bg='#F44336')
+        websocket = None
+                # Fuerza el cierre del vídeo y espera a que termine
+        try:
+            if video_stop_event is not None:
+                video_stop_event.set()
+            if video_thread and video_thread.is_alive():
+                video_thread.join(timeout=1.5)
+        except Exception:
+            pass
+        # Limpieza OpenCV por si acaso
+        try:
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)   # <- importante para que OpenCV procese el cierre
+        except Exception:
+            pass
+        # Resetea el picker HSV al desconectar
+        _hsv_destroy_windows()
+
+        ip_stu = 1
+        
         E1.config(state='normal'); Btn14.config(state='normal')
-        cpu_temp_var.set("N/A"); cpu_use_var.set("N/A"); ram_use_var.set("N/A")
-        print("Cerrando ventana de vídeo si está abierta...")
+        try:
+            l_ip_4.config(text='Disconnected', bg='#F44336')
+            l_ip_5.config(text='<No IP>')
+            E1.config(state='normal')
+            Btn14.config(state='normal')
+        except Exception:
+            pass
+        try:
+            if cpu_temp_var: cpu_temp_var.set("N/A")
+            if cpu_use_var:  cpu_use_var.set("N/A")
+            if ram_use_var:  ram_use_var.set("N/A")
+        except Exception:
+            pass
+
+        print("[WS] Bucle de red finalizado.")
 
 def start_network_thread():
     ip_adr = E1.get().strip()
