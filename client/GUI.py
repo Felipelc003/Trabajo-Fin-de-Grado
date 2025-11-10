@@ -415,7 +415,7 @@ def toggle_function(button_widget, start_command, stop_command):
         send_command(start_command)
         button_widget.config(bg='#4CAF50')
         function_button_active = button_widget
-        for btn in motor_controls + servo_controls: btn.config(state='disabled')
+        for btn in motor_controls + servo_controls: btn.config(state='disabled' if start_command != 'findColor' else 'normal')
 
 def call_function_1(event): send_command('scan')
 def call_function_2(event):
