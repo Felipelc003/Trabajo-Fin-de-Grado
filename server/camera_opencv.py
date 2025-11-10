@@ -158,10 +158,24 @@ class Camera(BaseCamera):
                 cam._fps_value = cam._fps_counter / (now - cam._fps_last_t)
                 cam._fps_counter = 0
                 cam._fps_last_t = now
+
+            # Leer estado publicado por functions.py → cv_processor.set_vehicle_status(...)
             try:
+                vs = cam._cv.get_vehicle_status() if (cam._cv is not None) else {}
+                v_speed = int(vs.get('speed', 0))
+                v_steer = int(vs.get('steer', 90))
+            except Exception:
+                v_speed, v_steer = 0, 90
+
+            # Clamp del ángulo a tu rango físico (60..130)
+            v_steer = max(60, min(130, v_steer))
+
+            # Pintar HUD: FPS | Q | v | θ
+            try:
+                hud = f"FPS {cam._fps_value:.1f}  Q{cam._jpeg_quality}  v {v_speed:>3}  \u03B8 {v_steer:>3}"
                 cv2.putText(
                     img,
-                    f"FPS {cam._fps_value:.1f}  Q{cam._jpeg_quality}",
+                    hud,
                     (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
@@ -171,6 +185,7 @@ class Camera(BaseCamera):
                 )
             except Exception:
                 pass
+
 
             # 4) JPEG + yield
             ok, jpeg = cv2.imencode(

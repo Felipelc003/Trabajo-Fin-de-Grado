@@ -24,9 +24,14 @@ STEER_LEFT         = 120
 K_STEER            = 0.10  # deg/px (invierte a -0.08 si gira al revés)
 
 # Velocidades
-DRIVE_BASE_SPEED    = 35
-DRIVE_MAX_SPEED     = 40
-MIN_MOVE_SPEED      = 30    # vencer rozamiento
+DRIVE_BASE_SPEED    = 27
+DRIVE_MAX_SPEED     = 30
+MIN_MOVE_SPEED      = 25    # vencer rozamiento
+
+# Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
+BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
+BOTTOM_CENTER_CUT_FRAC       = 0.45  # hasta un 45% del margen (MAX - MIN)
+BOTTOM_CENTER_DEADBAND_PX    = 8     # tolerancia: ignora offsets muy pequeños
 
 # Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
 ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad
@@ -68,10 +73,13 @@ FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
 
 ANY_BAND_MIN_SPEED = 38
 
-# -------- LATCH de búsqueda (cuando se pierde NEAR) --------
-SEARCH_TURN_DEG          = 18     # cuánto giro fijo meter en búsqueda
-SEARCH_DEBOUNCE_FRAMES   = 3      # frames de mejora consecutivos para soltar latch
-SEARCH_HYST_PX           = 1.0    # histéresis (px) para considerar "mejora" de |err|
+# --- cómo buscar cuando estamos en latch ---
+SEARCH_TURN_DEG        = 14   # giro suave hacia el lado perdido
+SEARCH_TURN_SPEED      = 32   # velocidad lenta mientras buscamos
+SEARCH_TURN_MAX_TIME_S = 2.0  # seguridad
+SEARCH_DEBOUNCE_FRAMES = 3      # nº de frames buenos para soltar latch
+SEARCH_HYST_PX         = 1.0    # margen de histéresis para considerar "mejora" de |err|
+NEAR_EDGE_THRESH_PX    = 140    # opcional: exigir que se perdió estando "en el borde"
 
 # Pesos de fallback near/mid/far (si no podemos mezclar 5)
 NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
@@ -81,6 +89,18 @@ ERR_EMA_ALPHA     = 0.25   # 0..1 (más alto = responde más rápido)
 ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
 TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
 USE_TANH_SHAPING  = True   # activa compresión no lineal del error
+
+# Recorte adicional por distancia al centro (todas las bandas)
+CENTER_DIST_SLOW_THRESH_PX = 120   # a partir de ~120 px de offset del centro empieza a recortar
+CENTER_DIST_CUT_FRAC       = 0.30  # recorta hasta el 30% del margen (DRIVE_MAX_SPEED - MIN_MOVE_SPEED)
+
+# --- disparo del latch sólo si NEAR se perdió en el borde ---
+NEAR_EDGE_THRESH_PX      = 140  # “muy lejos del centro” para considerar que se perdió en el borde
+
+# --- cómo buscar cuando estamos en latch ---
+SEARCH_TURN_DEG          = 14   # ya lo tienes; giro suave hacia el lado perdido
+SEARCH_TURN_SPEED        = 32   # velocidad lenta mientras buscamos
+SEARCH_TURN_MAX_TIME_S   = 2.0  # (opcional) por seguridad, máx. tiempo de búsqueda continua
 
 
 class Functions(threading.Thread):
@@ -394,12 +414,18 @@ class Functions(threading.Thread):
         # Recordatorio: err = center_x - cx  → err>0 => línea a la IZQUIERDA (cx a la izquierda)
         if hn and en is not None:
             self.last_near_side = 'left' if float(en) > 0 else 'right'
+            self.last_near_err  = float(en)  # asegura que se actualiza
 
         # 3.b) Lógica de LATCH de búsqueda
-        # Activa latch cuando NO hay NEAR, usando last_near_side
-        if not hn and self.search_latch is None and self.last_near_side in ('left', 'right'):
-            self.search_latch = self.last_near_side
-            self.search_debounce = 0
+        # Activa latch sólo cuando NO hay NEAR y la última vez estaba en el BORDE
+        if (self.search_latch is None) and (self.last_near_side in ('left', 'right')):
+            cond_perdida = (not hn) or (not any_band)
+            if cond_perdida:
+                # opcional: exige que la última vez estuviera "al borde"
+                if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
+                    self.search_latch = self.last_near_side
+                    self.search_debounce = 0
+                    self.search_started_t = now  # para límite de tiempo
 
         # Si hay NEAR y estamos en latch, soltamos sólo cuando |err_near| mejora durante N frames
         if hn and self.search_latch is not None and en is not None and self.last_near_err is not None:
@@ -480,7 +506,7 @@ class Functions(threading.Thread):
             servo_pos = self._steer_command(servo_cmd)
 
         # 5) Velocidad — AVANZA si hay al menos una banda, aunque near no esté
-        if self.line_follow_active and fresh and any_band:
+        if self.line_follow_active and fresh and (any_band or self.search_latch is not None):
             # referencia para modular velocidad: near si existe, si no mix_err, si no 0
             ref_err = None
             if hn and en is not None:
@@ -508,7 +534,31 @@ class Functions(threading.Thread):
                 k_far = max(0.0, min(1.0, abs(float(ef)) / float(FAR_ERR_SLOW_THRESH)))
                 cut_far = int(CUT_FAR_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_far)
 
-            desired = base - (cut_mid + cut_far)
+            # --- recorte por "descentramiento" de cualquiera de las 3 bandas bajas (2,3,4) ---
+            errs_abs = []
+            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) >= 5 and len(hasl) >= 5:
+                for i in (2, 3, 4):  # far-medio-cerca inferiores
+                    if hasl[i] and errs[i] is not None:
+                        off = abs(float(errs[i]))
+                        # deadband para no castigar micro-desalineaciones
+                        off = max(0.0, off - float(BOTTOM_CENTER_DEADBAND_PX))
+                        errs_abs.append(off)
+
+            extra_cut = 0
+            if errs_abs:
+                # si cualquiera se aleja, recortamos (uso el máximo para ser conservador)
+                max_off  = max(errs_abs)
+                k_center = max(0.0, min(1.0, max_off / float(BOTTOM_CENTER_SLOW_THRESH_PX)))
+                extra_cut = int(BOTTOM_CENTER_CUT_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_center)
+
+            desired = base - (cut_mid + cut_far + extra_cut)
+
+            if self.search_latch is not None:
+                # (opcional) corta la búsqueda si excede el tiempo máx.
+                if hasattr(self, 'search_started_t') and (now - self.search_started_t) > SEARCH_TURN_MAX_TIME_S:
+                     self.search_latch = None  # suelta por timeout de seguridad
+                desired = min(desired, SEARCH_TURN_SPEED)
+
 
             # Si NO hay NEAR pero sí otras → aseguremos avance mínimo
             if not hn:
@@ -518,15 +568,33 @@ class Functions(threading.Thread):
             self._set_target_speed(int(max(MIN_MOVE_SPEED, desired)))
             self._ramp_and_drive()
         else:
-            # Sin línea: parar tras N frames
-            self._no_line_frames += 1
-            if self._no_line_frames >= NO_LINE_STOP_FRAMES:
-                self._set_target_speed(0)
+            # Sin línea visible:
+            if self.search_latch is not None:
+                # Seguimos avanzando lento mientras buscamos
+                self._no_line_frames = 0
+                self._set_target_speed(int(max(MIN_MOVE_SPEED, SEARCH_TURN_SPEED)))
                 self._ramp_and_drive()
+            else:
+                # Parada segura tras N frames sin nada que ver
+                self._no_line_frames += 1
+                if self._no_line_frames >= NO_LINE_STOP_FRAMES:
+                    self._set_target_speed(0)
+                    self._ramp_and_drive()
+
 
         # 6) Memorias para próxima iteración
         if hn and en is not None:
-            self.last_near_err = float(en)
+             self.last_near_err = float(en)
+
+        # ... justo después de self._ramp_and_drive() (o al final del bloque de velocidad)
+        try:
+            cam = Camera.get_instance()
+            cvp = cam.cv_thread
+            # usa la velocidad actual y el último ángulo enviado (ya guardas self._servo_last_angle)
+            cvp.set_vehicle_status(self._current_speed, self._servo_last_angle)
+        except Exception:
+            pass
+
 
     # --------------- Bucle del hilo ---------------
 

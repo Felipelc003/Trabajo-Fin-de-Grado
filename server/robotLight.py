@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # File name   : robotLight.py
 # Description : Controlador unificado con librerías modernas (gpiozero y neopixel)
-import time, board, neopixel, threading
+import time, board, neopixel, threading, os
 from gpiozero import RGBLED
 
 class RobotLight(threading.Thread):
@@ -38,7 +38,7 @@ class RobotLight(threading.Thread):
         if self.led_derecho: self.led_derecho.off()
 
     def front_color(self, color_name):
-        color_map = {'red':(0,1,1), 'blue':(1,1,0), 'green':(1,0,1), 'white':(0,0,0), 'yellow':(0,0,1), 'cian':(1,0,0), 'magenta':(0,1,0)}
+        color_map = {'red':(0,1,1), 'blue':(1,1,0), 'green':(1,0,1), 'white':(0,0,0), 'black':(1,1,1), 'yellow':(0,0,1), 'cian':(1,0,0), 'magenta':(0,1,0)}
         if color_name in color_map:
             if self.led_izquierdo: self.led_izquierdo.color = color_map[color_name]
             if self.led_derecho: self.led_derecho.color = color_map[color_name]

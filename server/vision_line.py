@@ -10,30 +10,29 @@ import time
 # Perfiles HSV + Otsu (para wrappers)
 # ==========================
 BLACK_PROFILE = {
-    "hsv_lower": (106, 0, 0),
-    "hsv_upper": (179, 255, 71),
+    "hsv_lower": (40, 0, 0),
+    "hsv_upper": (179, 255, 20),
     "otsu_invert": True,
 }
 
 WHITE_PROFILE = {
-    "hsv_lower": (99, 0, 225),
+    "hsv_lower": (0, 90, 80),
     "hsv_upper": (179, 255, 255),
     "otsu_invert": False,
 }
-"""
+
 RED_PROFILE = {
-    "hsv_lower": (171, 89, 225),
-    "hsv_upper": (179, 255, 163),
+    "hsv_lower": (0, 158, 40),
+    "hsv_upper": (179, 255, 255),
     "otsu_invert": False,
 }
-"""
 
 # ==========================
 # Parámetros por bandas
 # ==========================
 Y_FRACS = [(0.00, 0.20), (0.20, 0.40), (0.40, 0.60), (0.60, 0.80), (0.80, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, False, False, True, False]
+BAND_ENABLED = [False, False, True, True, True]
 MIN_AREAS = [140, 160, 180, 200, 220]
 KERNEL_SIZES = [3, 3, 3, 3, 3]
 
@@ -51,7 +50,7 @@ NEAR_LEN, NEAR_MIN_W, NEAR_MAX_W = 140, 10, 70
 BORDER = 3
 COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255), (0, 255, 165), (0, 255, 0)]
 
-# Filtros
+# Filtros / thresholds
 FILL_RATIO_MAX = 0.32
 ELONG_MIN_NON_NEAR = 1.4
 CONTRAST_MIN_WHITE = 8.0
@@ -59,26 +58,26 @@ CONTRAST_MIN_BLACK = 6.0
 FILL_RATIO_MAX_WHITE = 0.45
 FILL_RATIO_MAX_BLACK = 0.60
 
-# Texto HUD (mismo tamaño que FPS)
+# Texto HUD
 TEXT_FONT_SCALE = 0.4
-TEXT_THICKNESS  = 1
-TEXT_Y          = 18
-TEXT_COLOR      = (50, 220, 50)
+TEXT_THICKNESS = 1
+TEXT_Y = 18
+TEXT_COLOR = (50, 220, 50)
 
 # Estados previos
-_SW_PREV_CX = [None, None, None, None, None]
-_POLARITY_PREV = [None, None, None, None, None]
+_SW_PREV_CX = [None] * N_BANDS
+_POLARITY_PREV = [None] * N_BANDS
 
 # ==========================
 # Overlay en modo "filas" (rectángulo que se mueve en X)
 # ==========================
-ROW_MODE = True          # Activar vista en 5 filas
+ROW_MODE = True
 ROW_PAD = 4
 ROW_BOX_W = 90
 ROW_THICK = 2
-ROW_USE_POLARITY_COLOR = True  # True: color por polaridad; False: color por banda
-ROW_FILLED = True               # Si quieres sólo contorno, pon False
-ROW_FILL_ALPHA = 0.25           # Transparencia del relleno
+ROW_USE_POLARITY_COLOR = True
+ROW_FILLED = True
+ROW_FILL_ALPHA = 0.25
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
@@ -91,8 +90,10 @@ def _fill_rect_alpha(dst, pt1, pt2, color, alpha=0.25):
 
 def _row_color(i, polarity):
     # Evitamos blanco puro para no "blanquear" visualmente
-    if ROW_USE_POLARITY_COLOR and polarity in ("black", "white"):
-        return (0, 180, 255) if polarity == "black" else (200, 200, 200)  # naranja p/negro, gris p/blanco
+    if ROW_USE_POLARITY_COLOR and polarity in ("black", "white", "red"):
+        return (0, 180, 255) if polarity == "black" else \
+               (200, 200, 200) if polarity == "white" else \
+               (0, 0, 255)
     return COLORS[i]
 
 def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False, alpha=0.25):
@@ -107,7 +108,7 @@ def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False
     yT = _clamp(int(cy - box_h // 2), y1, y2 - 1)
     yB = _clamp(int(cy + box_h // 2), y1, y2 - 1)
     if filled:
-        _fill_rect_alpha(overlay, (xL, yT), (xR, yB), color, alpha=0.25)
+        _fill_rect_alpha(overlay, (xL, yT), (xR, yB), color, alpha)
     cv2.rectangle(overlay, (xL, yT), (xR, yB), color, ROW_THICK)
 
 # ==========================
@@ -124,7 +125,7 @@ def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
     )
     m = cv2.bitwise_or(m_hsv, m_adapt)
     ker = np.ones((ksize, ksize), np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
@@ -141,7 +142,7 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     )
     m = cv2.bitwise_and(m_hsv, cv2.bitwise_and(m_otsu, m_adapt))
     ker = np.ones((ksize, ksize), np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
@@ -154,9 +155,12 @@ def _mask_from_profile(roi_hsv, roi_gray, profile, ksize=3):
     m_otsu = cv2.threshold(blur, 0, 255, th_flag + cv2.THRESH_OTSU)[1]
     m = cv2.bitwise_or(m_hsv, m_otsu)
     ker = np.ones((ksize, ksize), np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,  ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
+
+def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
+    return _mask_from_profile(roi_hsv, roi_gray, RED_PROFILE, ksize=ksize)
 
 def _largest_contour(mask):
     cnts = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -197,9 +201,11 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
     k = KERNEL_SIZES[idx]
     m_white = _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=k)
     m_black = _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=k)
+    m_red = _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=k)
 
     c_b = _largest_contour(m_black)
     c_w = _largest_contour(m_white)
+    c_r = _largest_contour(m_red)
 
     # Contraste
     bg_med = float(np.median(roi_gray)) if roi_gray.size else 0.0
@@ -207,8 +213,10 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
     mu_w = _mean_gray_in_contour(roi_gray, c_w) if c_w is not None else None
     ok_b = (mu_b is not None) and ((bg_med - mu_b) >= CONTRAST_MIN_BLACK)
     ok_w = (mu_w is not None) and ((mu_w - bg_med) >= CONTRAST_MIN_WHITE)
-    if not ok_b: c_b = None
-    if not ok_w: c_w = None
+    if not ok_b:
+        c_b = None
+    if not ok_w:
+        c_w = None
 
     def process_contour(c, is_near, is_black):
         if c is None:
@@ -251,21 +259,31 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
 
     rect_b, box_b, cx_b, cy_b, score_b, area_b, _ = process_contour(c_b, is_near=(idx == 4), is_black=True)
     rect_w, box_w, cx_w, cy_w, score_w, area_w, _ = process_contour(c_w, is_near=(idx == 4), is_black=False)
+    rect_r, box_r, cx_r, cy_r, score_r, area_r, _ = process_contour(c_r, is_near=(idx == 4), is_black=False)
 
     prev = _POLARITY_PREV[idx]
-    if (rect_b is None) and (rect_w is None):
+
+    # construir lista de candidatos presentes
+    cand = []
+    if rect_b is not None:
+        cand.append(('black', score_b))
+    if rect_w is not None:
+        cand.append(('white', score_w))
+    if rect_r is not None:
+        cand.append(('red', score_r))
+
+    if not cand:
         chosen = None
-    elif (rect_b is not None) and (rect_w is None):
-        chosen = 'black'
-    elif (rect_b is None) and (rect_w is not None):
-        chosen = 'white'
     else:
-        chosen = 'black' if score_b >= score_w else 'white'
+        # elige el de mayor score
+        chosen = max(cand, key=lambda t: t[1])[0]
         if prev is not None:
-            s_chosen = score_b if chosen == 'black' else score_w
-            s_prev   = score_b if prev   == 'black' else score_w
+            s_chosen = dict(cand).get(chosen, 0.0)
+            s_prev = dict(cand).get(prev, 0.0)
+            # si el ganador no mejora lo suficiente, mantenemos el anterior
             if s_prev > 0 and (s_chosen / max(1e-6, s_prev)) < 1.2:
                 chosen = prev
+
     _POLARITY_PREV[idx] = chosen
 
     if chosen is None:
@@ -275,12 +293,15 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
 
     if chosen == 'black':
         rect, box, cx, cy, score = rect_b, box_b, cx_b, cy_b, score_b
-        color_draw = (0, 180, 255)  # naranja
-        used_w = None if not FORCE_NEAR_VERTICAL or idx != 4 else min(rect[1])
-    else:
+        color_draw = (255, 0, 0)
+    elif chosen == 'white':
         rect, box, cx, cy, score = rect_w, box_w, cx_w, cy_w, score_w
-        color_draw = (255, 255, 255)  # (para filas usamos gris)
-        used_w = None if not FORCE_NEAR_VERTICAL or idx != 4 else min(rect[1])
+        color_draw = (255, 255, 255)
+    else:  # 'red'
+        rect, box, cx, cy, score = rect_r, box_r, cx_r, cy_r, score_r
+        color_draw = (0, 0, 255)
+
+    used_w = None if not FORCE_NEAR_VERTICAL or idx != 4 or rect is None else min(rect[1])
 
     if rect is None or box is None:
         if draw_overlays and overlay is not None and not ROW_MODE:
@@ -308,7 +329,7 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
 def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
     h, w = frame.shape[:2]
     center_x = w // 2
-    overlay = frame.copy() if draw_overlays else None  # <<-- SIEMPRE base BGR original
+    overlay = frame.copy() if draw_overlays else None
 
     hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -389,8 +410,10 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
     # HUD
     if draw_overlays and overlay is not None:
         cv2.line(overlay, (center_x, 0), (center_x, h - 1), (0, 255, 255), 1)
-        status = " ".join([f"{i}:{'B' if color_list[i]=='black' else ('W' if color_list[i]=='white' else '--')}"
-                           for i in range(N_BANDS - 1, -1, -1)])
+        status = " ".join([
+            f"{i}:{'B' if color_list[i] == 'black' else ('W' if color_list[i] == 'white' else ('R' if color_list[i] == 'red' else '--'))}"
+            for i in range(N_BANDS - 1, -1, -1)
+        ])
         cv2.putText(overlay, f"lineAuto | {status}", (10, TEXT_Y),
                     cv2.FONT_HERSHEY_SIMPLEX, TEXT_FONT_SCALE, TEXT_COLOR, TEXT_THICKNESS, cv2.LINE_AA)
 
@@ -414,6 +437,7 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
     }
     return state, (overlay if draw_overlays else None)
 
+
 # ==========================
 # Wrappers (compat)
 # ==========================
@@ -426,6 +450,7 @@ def _run_line_with_profile(frame: np.ndarray, profile: dict, draw_overlays: bool
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     results = [None] * N_BANDS
+    color_list = [None] * N_BANDS
     corridor_center = None
     widen = 0
     order = [4, 3, 2, 1, 0]
@@ -434,6 +459,7 @@ def _run_line_with_profile(frame: np.ndarray, profile: dict, draw_overlays: bool
         y1 = int(h * Y_FRACS[i][0]); y2 = int(h * Y_FRACS[i][1])
         if not BAND_ENABLED[i]:
             results[i] = {'found': False, 'cx': None, 'cy': None, 'band': (y1, y2), 'w_used': None}
+            color_list[i] = None
             continue
 
         roi_hsv = hsv[y1:y2, :]; roi_gray = gray[y1:y2, :]
@@ -462,6 +488,7 @@ def _run_line_with_profile(frame: np.ndarray, profile: dict, draw_overlays: bool
             continue
 
         cx_abs = int(cx_r)
+
         if _SW_PREV_CX[i] is not None:
             dx = cx_abs - _SW_PREV_CX[i]
             max_dx = MAX_STEP_X[i]
@@ -470,6 +497,7 @@ def _run_line_with_profile(frame: np.ndarray, profile: dict, draw_overlays: bool
             _SW_PREV_CX[i] = (1.0 - W_EMA) * float(_SW_PREV_CX[i]) + W_EMA * float(cx_abs)
         else:
             _SW_PREV_CX[i] = float(cx_abs)
+
 
         if FORCE_NEAR_VERTICAL and i == 4:
             line_w = max(NEAR_MIN_W, min(NEAR_MAX_W, float(min(rw, rh))))
@@ -532,3 +560,10 @@ def run_line_black(frame: np.ndarray, draw_overlays: bool = True):
 
 def run_line_white(frame: np.ndarray, draw_overlays: bool = True):
     return _run_line_with_profile(frame, WHITE_PROFILE, draw_overlays)
+
+def run_line_red(frame: np.ndarray, draw_overlays: bool = True):
+    return _run_line_with_profile(frame, RED_PROFILE, draw_overlays)
+"""
+def run_line_yellow(frame: np.ndarray, draw_overlays: bool = True):
+    return _run_line_with_profile(frame, YELLOW_PROFILE, draw_overlays)
+"""

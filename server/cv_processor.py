@@ -9,7 +9,6 @@ from typing import Optional
 import cv2
 import numpy as np
 
-
 class CVProcessor:
     def __init__(self):
         self.mode: str = "none"
@@ -30,6 +29,9 @@ class CVProcessor:
         self._qout = ctx.Queue(maxsize=1)  # (state, overlay) <- worker
         self._algo_size = (320, 240)
         self._every = 1   # procesa 1 de cada N frames
+
+        self._vehicle_status = {'speed': 0, 'steer': 90}
+        self._status_lock = threading.Lock()
 
         self._vision_proc = ctx.Process(
             target=_vision_worker_main,
@@ -61,6 +63,15 @@ class CVProcessor:
                 time.sleep(0.004)
         with self._line_lock:
             return dict(self._line_state), self._line_seq
+
+    def set_vehicle_status(self, speed: int, steer: int):
+        with self._status_lock:
+            self._vehicle_status = {'speed': int(speed), 'steer': int(steer)}
+
+    def get_vehicle_status(self):
+        with self._status_lock:
+            return dict(self._vehicle_status)
+
 
     # ----- llamado desde la cámara para pegar overlay y alimentar worker -----
     def draw_elements_on_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
