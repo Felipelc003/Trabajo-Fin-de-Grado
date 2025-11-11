@@ -28,7 +28,7 @@ class CVProcessor:
         self._qin = ctx.Queue(maxsize=1)   # Frame pequeño -> worker
         self._qout = ctx.Queue(maxsize=1)  # (state, overlay) <- worker
         self._algo_size = (320, 240)
-        self._every = 1   # procesa 1 de cada N frames
+        self._every = 3   # procesa 1 de cada N frames
 
         self._vehicle_status = {'speed': 0, 'steer': 90}
         self._status_lock = threading.Lock()

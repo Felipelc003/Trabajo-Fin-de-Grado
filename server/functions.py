@@ -76,7 +76,8 @@ ANY_BAND_MIN_SPEED = 38
 # --- cómo buscar cuando estamos en latch ---
 SEARCH_TURN_DEG        = 14   # giro suave hacia el lado perdido
 SEARCH_TURN_SPEED      = 32   # velocidad lenta mientras buscamos
-SEARCH_TURN_MAX_TIME_S = 2.0  # seguridad
+#SEARCH_TURN_MAX_TIME_S = 2.0  # seguridad
+SERACH_TURN_MAX_TIME_S = 5.0
 SEARCH_DEBOUNCE_FRAMES = 3      # nº de frames buenos para soltar latch
 SEARCH_HYST_PX         = 1.0    # margen de histéresis para considerar "mejora" de |err|
 NEAR_EDGE_THRESH_PX    = 140    # opcional: exigir que se perdió estando "en el borde"
@@ -85,7 +86,7 @@ NEAR_EDGE_THRESH_PX    = 140    # opcional: exigir que se perdió estando "en el
 NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
 
 # --- Suavizado del error ---
-ERR_EMA_ALPHA     = 0.25   # 0..1 (más alto = responde más rápido)
+ERR_EMA_ALPHA     = 0.40   # 0..1 (más alto = responde más rápido)
 ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
 TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
 USE_TANH_SHAPING  = True   # activa compresión no lineal del error
@@ -444,8 +445,13 @@ class Functions(threading.Thread):
         # 4.a) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
         if self.search_latch is not None:
             # Signo: steer>0 izquierda, steer<0 derecha
-            steer_bias_deg = (+SEARCH_TURN_DEG) if self.search_latch == 'left' else (-SEARCH_TURN_DEG)
-            servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, STEER_CENTER + int(steer_bias_deg)))
+            #steer_bias_deg = (+SEARCH_TURN_DEG) if self.search_latch == 'left' else (-SEARCH_TURN_DEG)
+            #servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, STEER_CENTER + int(steer_bias_deg)))
+            if self.search_latch == 'left':
+                servo_cmd = STEER_LEFT  # Gira a tope izquierda (120)
+            else:
+                servo_cmd = STEER_RIGHT # Gira a tope derecha (60)
+
             servo_pos = self._steer_command(servo_cmd)
         else:
             # 4.b) Dirección por mezcla de 5 ventanas con pesos WIN_WEIGHTS

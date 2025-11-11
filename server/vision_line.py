@@ -22,9 +22,15 @@ WHITE_PROFILE = {
 }
 
 RED_PROFILE = {
-    "hsv_lower": (0, 158, 40),
-    "hsv_upper": (179, 255, 255),
+    "hsv_lower": (0, 193, 0),
+    "hsv_upper": (15, 255, 255),
     "otsu_invert": False,
+}
+
+YELLOW_PROFILE = {
+    "hsv_lower": (0, 0, 60),
+    "hsv_upper": (55, 255, 255),
+    "otsu_invert": False, # Las líneas claras no invierten Otsu
 }
 
 # ==========================
@@ -90,10 +96,11 @@ def _fill_rect_alpha(dst, pt1, pt2, color, alpha=0.25):
 
 def _row_color(i, polarity):
     # Evitamos blanco puro para no "blanquear" visualmente
-    if ROW_USE_POLARITY_COLOR and polarity in ("black", "white", "red"):
+    if ROW_USE_POLARITY_COLOR and polarity in ("black", "white", "red", "yellow"):
         return (0, 180, 255) if polarity == "black" else \
                (200, 200, 200) if polarity == "white" else \
-               (0, 0, 255)
+               (0, 0, 255) if polarity == "red" else \
+               (0, 255, 255) # Añadido: BGR para amarillo
     return COLORS[i]
 
 def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False, alpha=0.25):
@@ -162,6 +169,9 @@ def _mask_from_profile(roi_hsv, roi_gray, profile, ksize=3):
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
     return _mask_from_profile(roi_hsv, roi_gray, RED_PROFILE, ksize=ksize)
 
+def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
+    return _mask_from_profile(roi_hsv, roi_gray, YELLOW_PROFILE, ksize=ksize)
+
 def _largest_contour(mask):
     cnts = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = cnts[0] if len(cnts) == 2 else cnts[1]
@@ -202,10 +212,12 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
     m_white = _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=k)
     m_black = _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=k)
     m_red = _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=k)
+    m_yellow = _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=k)
 
     c_b = _largest_contour(m_black)
     c_w = _largest_contour(m_white)
     c_r = _largest_contour(m_red)
+    c_y = _largest_contour(m_yellow)
 
     # Contraste
     bg_med = float(np.median(roi_gray)) if roi_gray.size else 0.0
@@ -260,6 +272,7 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
     rect_b, box_b, cx_b, cy_b, score_b, area_b, _ = process_contour(c_b, is_near=(idx == 4), is_black=True)
     rect_w, box_w, cx_w, cy_w, score_w, area_w, _ = process_contour(c_w, is_near=(idx == 4), is_black=False)
     rect_r, box_r, cx_r, cy_r, score_r, area_r, _ = process_contour(c_r, is_near=(idx == 4), is_black=False)
+    rect_y, box_y, cx_y, cy_y, score_y, area_y, _ = process_contour(c_y, is_near=(idx == 4), is_black=False)
 
     prev = _POLARITY_PREV[idx]
 
@@ -271,7 +284,8 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
         cand.append(('white', score_w))
     if rect_r is not None:
         cand.append(('red', score_r))
-
+    if rect_y is not None:
+        cand.append(('yellow', score_y))
     if not cand:
         chosen = None
     else:
@@ -293,13 +307,16 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
 
     if chosen == 'black':
         rect, box, cx, cy, score = rect_b, box_b, cx_b, cy_b, score_b
-        color_draw = (255, 0, 0)
+        color_draw = (0, 0, 0)
     elif chosen == 'white':
         rect, box, cx, cy, score = rect_w, box_w, cx_w, cy_w, score_w
         color_draw = (255, 255, 255)
-    else:  # 'red'
+    elif chosen == 'red': # El 'else' original ahora es 'elif'
         rect, box, cx, cy, score = rect_r, box_r, cx_r, cy_r, score_r
-        color_draw = (0, 0, 255)
+        color_draw = (0, 255, 255)
+    elif chosen == 'yellow':
+        rect, box, cx, cy, score = rect_y, box_y, cx_y, cy_y, score_y
+        color_draw = (0, 255, 255) # BGR para amarillo
 
     used_w = None if not FORCE_NEAR_VERTICAL or idx != 4 or rect is None else min(rect[1])
 
@@ -411,7 +428,7 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
     if draw_overlays and overlay is not None:
         cv2.line(overlay, (center_x, 0), (center_x, h - 1), (0, 255, 255), 1)
         status = " ".join([
-            f"{i}:{'B' if color_list[i] == 'black' else ('W' if color_list[i] == 'white' else ('R' if color_list[i] == 'red' else '--'))}"
+            f"{i}:{'B' if color_list[i] == 'black' else ('W' if color_list[i] == 'white' else ('R' if color_list[i] == 'red' else ('Y' if color_list[i] == 'yellow' else '--')))}"
             for i in range(N_BANDS - 1, -1, -1)
         ])
         cv2.putText(overlay, f"lineAuto | {status}", (10, TEXT_Y),
@@ -563,7 +580,7 @@ def run_line_white(frame: np.ndarray, draw_overlays: bool = True):
 
 def run_line_red(frame: np.ndarray, draw_overlays: bool = True):
     return _run_line_with_profile(frame, RED_PROFILE, draw_overlays)
-"""
+
 def run_line_yellow(frame: np.ndarray, draw_overlays: bool = True):
     return _run_line_with_profile(frame, YELLOW_PROFILE, draw_overlays)
-"""
+
