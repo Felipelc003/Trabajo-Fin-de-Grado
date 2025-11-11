@@ -28,8 +28,8 @@ RED_PROFILE = {
 }
 
 YELLOW_PROFILE = {
-    "hsv_lower": (0, 0, 60),
-    "hsv_upper": (55, 255, 255),
+    "hsv_lower": (0, 0, 68),
+    "hsv_upper": (80, 255, 255),
     "otsu_invert": False, # Las líneas claras no invierten Otsu
 }
 
@@ -38,7 +38,7 @@ YELLOW_PROFILE = {
 # ==========================
 Y_FRACS = [(0.00, 0.20), (0.20, 0.40), (0.40, 0.60), (0.60, 0.80), (0.80, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, False, True, True, True]
+BAND_ENABLED = [False, True, True, True, True]
 MIN_AREAS = [140, 160, 180, 200, 220]
 KERNEL_SIZES = [3, 3, 3, 3, 3]
 
@@ -49,7 +49,7 @@ W_EMA = 0.6
 WIDEN_STEP = 20
 MAX_WIDEN = 60
 
-FORCE_NEAR_VERTICAL = True
+FORCE_NEAR_VERTICAL = False
 NEAR_LEN, NEAR_MIN_W, NEAR_MAX_W = 140, 10, 70
 
 # Overlays (contornos clásicos)

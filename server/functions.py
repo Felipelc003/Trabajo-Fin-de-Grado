@@ -22,6 +22,8 @@ STEER_RIGHT        = 60
 STEER_CENTER       = 90   # calibra "recto" real
 STEER_LEFT         = 120
 K_STEER            = 0.10  # deg/px (invierte a -0.08 si gira al revés)
+KD_STEER           = 0.04  # Ganancia Derivativa
+KI_STEER           = 0.01  # Ganancia Integral
 
 # Velocidades
 DRIVE_BASE_SPEED    = 27
@@ -49,7 +51,7 @@ DEBUG_DRIVE_LOG_EVERY = 0.0
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.05, 0.10, 0.15, 0.25, 0.45]  # suma ≈ 1.0
+WIN_WEIGHTS = [0.15, 0.25, 0.30, 0.20, 0.10]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -67,7 +69,7 @@ MID_PRESTEER_DEG  = 6   # si mid también la ve → suma ±10°
 NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
 
 # Limitador de velocidad de giro del servo (suaviza cambios bruscos)
-STEER_SLEW_DEG_PER_SEC = 120  # máx grados/seg que puede cambiar el servo
+STEER_SLEW_DEG_PER_SEC = 90  # máx grados/seg que puede cambiar el servo
 
 FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
 
@@ -139,6 +141,11 @@ class Functions(threading.Thread):
         self.search_debounce = 0         # frames de mejora hacia el centro
 
         self._err_ema = None   # último error filtrado para la mezcla
+
+        # --- ESTADO PID ---
+        self._pid_last_err = 0.0
+        self._pid_integral = 0.0
+        self._pid_last_time = time.time()
 
         # Motores listos
         try:
@@ -469,32 +476,36 @@ class Functions(threading.Thread):
                     grad = e_bottom - e_top
                     mix_err = mix_err + PRED_GAIN * grad
                     mix_err = self._filter_mix_err(mix_err)
-                    servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
 
-            if servo_base is None and (hn or hm or hf):
-                # Fallback a near/mid/far si no hay mezcla usable (con pesos fuertes a NEAR)
-                env = float(en) if (hn and en is not None) else None
-                emv = float(em) if (hm and em is not None) else None
-                efv = float(ef) if (hf and ef is not None) else None
+            if mix_err is None:
+                servo_base = STEER_CENTER
+            else:
+                now = time.time()
+                dt = max(1e-3, now - self._pid_last_time)
 
-                acc = 0.0
-                wsum = 0.0
-                if env is not None:
-                    acc  += NEAR_W * env
-                    wsum += NEAR_W
-                if emv is not None:
-                    acc  += MID_W * emv
-                    wsum += MID_W
-                if efv is not None:
-                    acc  += FAR_W * efv
-                    wsum += FAR_W
+                # --- LÓGICA PID ---
+                error = float(mix_err) # Error P
 
-                mix_err = (acc / wsum) if wsum > 0 else 0.0
+                # Término I (con "anti-windup": si no hay línea, resetea)
+                if not any_band:
+                    self._pid_integral = 0.0
+                else:
+                    self._pid_integral += error * dt
+                    self._pid_integral = max(-100.0, min(100.0, self._pid_integral)) # Límite
 
-                # <<< suavizado del error: deadband + EMA + (opcional) tanh >>>
-                mix_err = self._filter_mix_err(mix_err)
+                # Término D
+                derivative = (error - self._pid_last_err) / dt
 
-                servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
+                # Guardar para la próxima
+                self._pid_last_err = error
+                self._pid_last_time = now
+
+                # Cálculo final de dirección
+                pid_out = (K_STEER * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
+
+                # Quita el cálculo antiguo
+                # servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
+                servo_base = int(STEER_CENTER + pid_out)
 
             # 4.c) PRE-GIRO escalonado por bandas (empieza con FAR)
             pre_bias = 0
