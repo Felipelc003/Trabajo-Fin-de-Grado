@@ -26,9 +26,9 @@ KD_STEER           = 0.04  # Ganancia Derivativa
 KI_STEER           = 0.01  # Ganancia Integral
 
 # Velocidades
-DRIVE_BASE_SPEED    = 27
-DRIVE_MAX_SPEED     = 30
-MIN_MOVE_SPEED      = 25    # vencer rozamiento
+DRIVE_BASE_SPEED    = 31
+DRIVE_MAX_SPEED     = 35
+MIN_MOVE_SPEED      = 28    # vencer rozamiento
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -79,7 +79,7 @@ ANY_BAND_MIN_SPEED = 38
 SEARCH_TURN_DEG        = 14   # giro suave hacia el lado perdido
 SEARCH_TURN_SPEED      = 32   # velocidad lenta mientras buscamos
 #SEARCH_TURN_MAX_TIME_S = 2.0  # seguridad
-SERACH_TURN_MAX_TIME_S = 5.0
+SERACH_TURN_MAX_TIME_S = 20.0
 SEARCH_DEBOUNCE_FRAMES = 3      # nº de frames buenos para soltar latch
 SEARCH_HYST_PX         = 1.0    # margen de histéresis para considerar "mejora" de |err|
 NEAR_EDGE_THRESH_PX    = 140    # opcional: exigir que se perdió estando "en el borde"
@@ -98,7 +98,7 @@ CENTER_DIST_SLOW_THRESH_PX = 120   # a partir de ~120 px de offset del centro em
 CENTER_DIST_CUT_FRAC       = 0.30  # recorta hasta el 30% del margen (DRIVE_MAX_SPEED - MIN_MOVE_SPEED)
 
 # --- disparo del latch sólo si NEAR se perdió en el borde ---
-NEAR_EDGE_THRESH_PX      = 140  # “muy lejos del centro” para considerar que se perdió en el borde
+NEAR_EDGE_THRESH_PX      = 100  # “muy lejos del centro” para considerar que se perdió en el borde
 
 # --- cómo buscar cuando estamos en latch ---
 SEARCH_TURN_DEG          = 14   # ya lo tienes; giro suave hacia el lado perdido
@@ -429,7 +429,7 @@ class Functions(threading.Thread):
         if (self.search_latch is None) and (self.last_near_side in ('left', 'right')):
             cond_perdida = (not hn) or (not any_band)
             if cond_perdida:
-                # opcional: exige que la última vez estuviera "al borde"
+                # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
                 if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
                     self.search_latch = self.last_near_side
                     self.search_debounce = 0

@@ -10,44 +10,44 @@ import time
 # Perfiles HSV + Otsu (para wrappers)
 # ==========================
 BLACK_PROFILE = {
-    "hsv_lower": (40, 0, 0),
-    "hsv_upper": (179, 255, 20),
+    "hsv_lower": (0, 0, 0),
+    "hsv_upper": (179, 255, 120),
     "otsu_invert": True,
 }
 
 WHITE_PROFILE = {
-    "hsv_lower": (0, 90, 80),
-    "hsv_upper": (179, 255, 255),
+    "hsv_lower": (0, 0, 160),
+    "hsv_upper": (179, 70, 255),
     "otsu_invert": False,
 }
 
 RED_PROFILE = {
-    "hsv_lower": (0, 193, 0),
-    "hsv_upper": (15, 255, 255),
+    "hsv_lower": (0, 193, 26),
+    "hsv_upper": (179, 255, 60),
     "otsu_invert": False,
 }
 
 YELLOW_PROFILE = {
-    "hsv_lower": (0, 0, 68),
-    "hsv_upper": (80, 255, 255),
+    "hsv_lower": (20, 100, 50),
+    "hsv_upper": (50, 255, 110),
     "otsu_invert": False, # Las líneas claras no invierten Otsu
 }
 
 # ==========================
 # Parámetros por bandas
 # ==========================
-Y_FRACS = [(0.00, 0.20), (0.20, 0.40), (0.40, 0.60), (0.60, 0.80), (0.80, 1.00)]
+Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.80), (0.80, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, True, True, True, True]
-MIN_AREAS = [140, 160, 180, 200, 220]
-KERNEL_SIZES = [3, 3, 3, 3, 3]
+BAND_ENABLED = [False, False, False, True, True]
+MIN_AREAS = [210, 240, 270, 300, 330]
+KERNEL_SIZES = [3, 3, 3, 4, 3]
 
-CORRIDOR_HALVES = [50, 45, 40, 35, 55]
+CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
 
 W_EMA = 0.6
-WIDEN_STEP = 20
-MAX_WIDEN = 60
+WIDEN_STEP = 40
+MAX_WIDEN = 120
 
 FORCE_NEAR_VERTICAL = False
 NEAR_LEN, NEAR_MIN_W, NEAR_MAX_W = 140, 10, 70
@@ -79,7 +79,7 @@ _POLARITY_PREV = [None] * N_BANDS
 # ==========================
 ROW_MODE = True
 ROW_PAD = 4
-ROW_BOX_W = 90
+ROW_BOX_W = 45
 ROW_THICK = 2
 ROW_USE_POLARITY_COLOR = True
 ROW_FILLED = True
@@ -153,6 +153,48 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
+def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
+    # El rojo necesita DOS rangos de Matiz (H) y ALTA SATURACIÓN
+    
+    # Rango 1 (bajos H: 0-10)
+    # Exigimos S > 100 y V > 80 para evitar blancos y negros
+    lower1 = np.array([0, 100, 80])
+    upper1 = np.array([10, 255, 255])
+    mask1 = cv2.inRange(roi_hsv, lower1, upper1)
+    
+    # Rango 2 (altos H: 170-179)
+    # Exigimos S > 100 y V > 80
+    lower2 = np.array([170, 100, 80])
+    upper2 = np.array([179, 255, 255])
+    mask2 = cv2.inRange(roi_hsv, lower2, upper2)
+    
+    # Combinamos ambas máscaras de HUE
+    m_hsv = cv2.bitwise_or(mask1, mask2)
+    
+    # (El resto es la limpieza morfológica que ya tenías)
+    ker = np.ones((ksize, ksize), np.uint8)
+    m = cv2.morphologyEx(m_hsv, cv2.MORPH_OPEN, ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
+    return m
+
+def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
+    # Definimos el rango HSV estricto para amarillo
+    # H: 20-40, S > 100, V > 80
+    lower = np.array([25, 60, 50])
+    upper = np.array([70, 255, 255])
+    
+    # Aplicamos la máscara HSV
+    m_hsv = cv2.inRange(roi_hsv, lower, upper)
+    
+    # Obtenemos el tamaño del kernel de las constantes
+    ker = np.ones((ksize, ksize), np.uint8) #
+    
+    # Aplicamos la limpieza morfológica (OPEN para quitar ruido, CLOSE para rellenar)
+    m = cv2.morphologyEx(m_hsv, cv2.MORPH_OPEN, ker, iterations=1) #
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1) #
+    
+    return m
+
 def _mask_from_profile(roi_hsv, roi_gray, profile, ksize=3):
     lower = np.array(profile["hsv_lower"], np.uint8)
     upper = np.array(profile["hsv_upper"], np.uint8)
@@ -165,12 +207,6 @@ def _mask_from_profile(roi_hsv, roi_gray, profile, ksize=3):
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
-
-def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    return _mask_from_profile(roi_hsv, roi_gray, RED_PROFILE, ksize=ksize)
-
-def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    return _mask_from_profile(roi_hsv, roi_gray, YELLOW_PROFILE, ksize=ksize)
 
 def _largest_contour(mask):
     cnts = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -316,7 +352,7 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
         color_draw = (0, 255, 255)
     elif chosen == 'yellow':
         rect, box, cx, cy, score = rect_y, box_y, cx_y, cy_y, score_y
-        color_draw = (0, 255, 255) # BGR para amarillo
+        color_draw = (0, 0, 255) # BGR para amarillo
 
     used_w = None if not FORCE_NEAR_VERTICAL or idx != 4 or rect is None else min(rect[1])
 
@@ -428,7 +464,7 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
     if draw_overlays and overlay is not None:
         cv2.line(overlay, (center_x, 0), (center_x, h - 1), (0, 255, 255), 1)
         status = " ".join([
-            f"{i}:{'B' if color_list[i] == 'black' else ('W' if color_list[i] == 'white' else ('R' if color_list[i] == 'red' else ('Y' if color_list[i] == 'yellow' else '--')))}"
+            f"{i}:{'B' if color_list[i] == 'black' else ('W' if color_list[i] == 'white' else ('R' if color_list[i] == 'red' else ('Y' if color_list[i] == 'yellow' else '-')))}"
             for i in range(N_BANDS - 1, -1, -1)
         ])
         cv2.putText(overlay, f"lineAuto | {status}", (10, TEXT_Y),
