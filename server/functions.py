@@ -436,14 +436,14 @@ class Functions(threading.Thread):
                     self.search_started_t = now  # para límite de tiempo
 
         # Si hay NEAR y estamos en latch, soltamos sólo cuando |err_near| mejora durante N frames
-        if hn and self.search_latch is not None and en is not None and self.last_near_err is not None:
-            if abs(float(en)) < abs(float(self.last_near_err)) - SEARCH_HYST_PX:
-                self.search_debounce += 1
-            else:
-                self.search_debounce = 0
+        if hn and self.search_latch is not None:
+            self.search_debounce += 1
             if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
-                self.search_latch = None
+                self.search_latch = None  # ¡LATCH SUELTO!
                 self.search_debounce = 0
+        elif self.search_latch is not None:
+            # Si estamos buscando pero no vemos NEAR (hn=False), reseteamos el contador
+            self.search_debounce = 0
 
         # 4) Dirección base
         servo_base = None

@@ -22,8 +22,8 @@ WHITE_PROFILE = {
 }
 
 RED_PROFILE = {
-    "hsv_lower": (0, 193, 26),
-    "hsv_upper": (179, 255, 60),
+    "hsv_lower": (0, 150, 0),
+    "hsv_upper": (10, 255, 255),
     "otsu_invert": False,
 }
 
@@ -35,7 +35,7 @@ YELLOW_PROFILE = {
 
 # ==========================
 # Parámetros por bandas
-# ==========================
+# =========================
 Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.80), (0.80, 1.00)]
 N_BANDS = 5
 BAND_ENABLED = [False, False, False, True, True]
@@ -60,7 +60,7 @@ COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255), (0, 255, 165), (0, 255, 0)]
 FILL_RATIO_MAX = 0.32
 ELONG_MIN_NON_NEAR = 1.4
 CONTRAST_MIN_WHITE = 8.0
-CONTRAST_MIN_BLACK = 6.0
+CONTRAST_MIN_BLACK = 3.0
 FILL_RATIO_MAX_WHITE = 0.45
 FILL_RATIO_MAX_BLACK = 0.60
 
@@ -137,6 +137,8 @@ def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
     return m
 
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
+    return _mask_from_profile(roi_hsv, roi_gray, BLACK_PROFILE, ksize=ksize)
+    """
     m_hsv = cv2.inRange(
         roi_hsv,
         np.array((0, 0, 0), np.uint8),
@@ -152,28 +154,32 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
+    """
 
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    # El rojo necesita DOS rangos de Matiz (H) y ALTA SATURACIÓN
-    
-    # Rango 1 (bajos H: 0-10)
-    # Exigimos S > 100 y V > 80 para evitar blancos y negros
+    # Rango 1 (bajos H) - Exigimos S > 100
     lower1 = np.array([0, 100, 80])
     upper1 = np.array([10, 255, 255])
     mask1 = cv2.inRange(roi_hsv, lower1, upper1)
     
-    # Rango 2 (altos H: 170-179)
-    # Exigimos S > 100 y V > 80
+    # Rango 2 (altos H) - Exigimos S > 100
     lower2 = np.array([170, 100, 80])
     upper2 = np.array([179, 255, 255])
     mask2 = cv2.inRange(roi_hsv, lower2, upper2)
     
-    # Combinamos ambas máscaras de HUE
-    m_hsv = cv2.bitwise_or(mask1, mask2)
-    
-    # (El resto es la limpieza morfológica que ya tenías)
+    m_hsv = cv2.bitwise_or(mask1, mask2) # Máscara de color
+
+    # --- AÑADIMOS OTSU DE VUELTA ---
+    blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
+    # Usamos Otsu normal (NO inverso) porque la línea roja es más "clara" que el fondo
+    m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+    # Usamos AND: Debe ser roja (HSV) Y ser parte del objeto (Otsu)
+    m = cv2.bitwise_and(m_hsv, m_otsu)
+    # --- FIN DE LA ADICIÓN ---
+
     ker = np.ones((ksize, ksize), np.uint8)
-    m = cv2.morphologyEx(m_hsv, cv2.MORPH_OPEN, ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
