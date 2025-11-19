@@ -22,8 +22,8 @@ WHITE_PROFILE = {
 }
 
 RED_PROFILE = {
-    "hsv_lower": (0, 150, 0),
-    "hsv_upper": (10, 255, 255),
+    "hsv_lower": (0, 193, 26),
+    "hsv_upper": (179, 255, 60),
     "otsu_invert": False,
 }
 
@@ -38,9 +38,9 @@ YELLOW_PROFILE = {
 # =========================
 Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.80), (0.80, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, False, False, True, True]
+BAND_ENABLED = [False, False, True, True, True]
 MIN_AREAS = [210, 240, 270, 300, 330]
-KERNEL_SIZES = [3, 3, 3, 4, 3]
+KERNEL_SIZES = [3, 3, 3, 4, 4]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -137,24 +137,24 @@ def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
     return m
 
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    return _mask_from_profile(roi_hsv, roi_gray, BLACK_PROFILE, ksize=ksize)
-    """
     m_hsv = cv2.inRange(
         roi_hsv,
         np.array((0, 0, 0), np.uint8),
-        np.array((179, 255, 120), np.uint8)
+        np.array((179, 255, 120), np.uint8) # Un V-max de 120 es más seguro que 18
     )
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
     m_adapt = cv2.adaptiveThreshold(
         roi_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5
     )
+    
+    # Esta lógica AND AND AND es la original y correcta para el negro
     m = cv2.bitwise_and(m_hsv, cv2.bitwise_and(m_otsu, m_adapt))
+    
     ker = np.ones((ksize, ksize), np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
-    """
 
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # Rango 1 (bajos H) - Exigimos S > 100
@@ -175,7 +175,7 @@ def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
     # Usamos AND: Debe ser roja (HSV) Y ser parte del objeto (Otsu)
-    m = cv2.bitwise_and(m_hsv, m_otsu)
+    m = cv2.bitwise_or(m_hsv, m_otsu)
     # --- FIN DE LA ADICIÓN ---
 
     ker = np.ones((ksize, ksize), np.uint8)

@@ -18,17 +18,17 @@ SERVO_TILT = 0
 SERVO_STEERING = 2
 
 # Dirección (ajusta a tu coche)
-STEER_RIGHT        = 60
-STEER_CENTER       = 90   # calibra "recto" real
+STEER_RIGHT        = 50
+STEER_CENTER       = 88.5   # calibra "recto" real
 STEER_LEFT         = 120
 K_STEER            = 0.10  # deg/px (invierte a -0.08 si gira al revés)
 KD_STEER           = 0.04  # Ganancia Derivativa
 KI_STEER           = 0.01  # Ganancia Integral
 
 # Velocidades
-DRIVE_BASE_SPEED    = 31
-DRIVE_MAX_SPEED     = 35
-MIN_MOVE_SPEED      = 28    # vencer rozamiento
+DRIVE_BASE_SPEED    = 40
+DRIVE_MAX_SPEED     = 45
+MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -83,6 +83,11 @@ SERACH_TURN_MAX_TIME_S = 20.0
 SEARCH_DEBOUNCE_FRAMES = 3      # nº de frames buenos para soltar latch
 SEARCH_HYST_PX         = 1.0    # margen de histéresis para considerar "mejora" de |err|
 NEAR_EDGE_THRESH_PX    = 140    # opcional: exigir que se perdió estando "en el borde"
+SEARCH_FORWARD_TIMEOUT_S   = 5.0  # Tiempo para la búsqueda hacia adelante
+
+# --- Constantes para la maniobra de reversa ---
+SEARCH_REVERSE_SPEED       = 28   # Velocidad de marcha atrás (ajusta según tu motor)
+SEARCH_REACQUIRE_CENTER_PX = 40   # Umbral (en píxeles) para considerar la línea "centrada"
 
 # Pesos de fallback near/mid/far (si no podemos mezclar 5)
 NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
@@ -431,19 +436,41 @@ class Functions(threading.Thread):
             if cond_perdida:
                 # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
                 if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
-                    self.search_latch = self.last_near_side
+                    if self.last_near_side == 'left':
+                        self.search_latch = 'search_forward_left'
+                    else:
+                        self.search_latch = 'search_forward_right'
+
                     self.search_debounce = 0
                     self.search_started_t = now  # para límite de tiempo
 
-        # Si hay NEAR y estamos en latch, soltamos sólo cuando |err_near| mejora durante N frames
-        if hn and self.search_latch is not None:
-            self.search_debounce += 1
-            if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
-                self.search_latch = None  # ¡LATCH SUELTO!
+        # 3.c) Lógica de LATCH (TRANSICIÓN Y SALIDA)
+        if self.search_latch is not None:
+            
+            # Condición de SALIDA (Línea centrada)
+            if hn and en is not None and (abs(float(en)) < SEARCH_REACQUIRE_CENTER_PX):
+                self.search_debounce += 1
+                if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
+                    self.search_latch = None  # ¡LATCH SUELTO! (Sale de la búsqueda)
+                    self.search_debounce = 0
+                    self._motor_stop() # Paramos motores inmediatamente
+                    
+            # Condición de TRANSICIÓN (Timeout Etapa 1 -> Etapa 2)
+            elif self.search_latch in ('search_forward_left', 'search_forward_right'):
+                if (now - self.search_started_t) > SEARCH_FORWARD_TIMEOUT_S:
+                    # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
+                    if self.search_latch == 'search_forward_left':
+                        self.search_latch = 'search_reverse_left'
+                    else:
+                        self.search_latch = 'search_reverse_right'
+                
+                # Si vemos la línea pero no está centrada, reseteamos debounce
+                if hn:
+                    self.search_debounce = 0
+                    
+            # Si estamos buscando (en cualquier etapa) y no vemos la línea
+            elif not hn:
                 self.search_debounce = 0
-        elif self.search_latch is not None:
-            # Si estamos buscando pero no vemos NEAR (hn=False), reseteamos el contador
-            self.search_debounce = 0
 
         # 4) Dirección base
         servo_base = None
@@ -451,16 +478,22 @@ class Functions(threading.Thread):
 
         # 4.a) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
         if self.search_latch is not None:
-            # Signo: steer>0 izquierda, steer<0 derecha
-            #steer_bias_deg = (+SEARCH_TURN_DEG) if self.search_latch == 'left' else (-SEARCH_TURN_DEG)
-            #servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, STEER_CENTER + int(steer_bias_deg)))
-            if self.search_latch == 'left':
-                servo_cmd = STEER_LEFT  # Gira a tope izquierda (120)
-            else:
-                servo_cmd = STEER_RIGHT # Gira a tope derecha (60)
 
+           # Etapa 1: Búsqueda ADELANTE (Gira HACIA el lado perdido)
+            if self.search_latch == 'search_forward_right':
+                servo_cmd = STEER_RIGHT
+            elif self.search_latch == 'search_forward_left':
+                servo_cmd = STEER_LEFT
+                
+            # Etapa 2: Búsqueda REVERSA (Gira OPUESTO al lado perdido)
+            elif self.search_latch == 'search_reverse_right':
+                servo_cmd = STEER_LEFT
+            elif self.search_latch == 'search_reverse_left':
+                servo_cmd = STEER_RIGHT
+                
             servo_pos = self._steer_command(servo_cmd)
         else:
+
             # 4.b) Dirección por mezcla de 5 ventanas con pesos WIN_WEIGHTS
             if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
                 acc = 0.0; wsum = 0.0
@@ -522,9 +555,28 @@ class Functions(threading.Thread):
             servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
             servo_pos = self._steer_command(servo_cmd)
 
-        # 5) Velocidad — AVANZA si hay al menos una banda, aunque near no esté
-        if self.line_follow_active and fresh and (any_band or self.search_latch is not None):
-            # referencia para modular velocidad: near si existe, si no mix_err, si no 0
+        # 5) Velocidad
+        if self.search_latch is not None:
+            # --- MODO DE BÚSQUEDA (ETAPA 1 o 2) ---
+            self._no_line_frames = 0 # Evita la parada de pánico
+            
+            # Etapa 1: ADELANTE (usa la rampa y velocidad de búsqueda)
+            if self.search_latch in ('search_forward_right', 'search_forward_left'):
+                self._set_target_speed(SEARCH_TURN_SPEED)
+                self._ramp_and_drive()
+            
+            # Etapa 2: REVERSA (orden directa al motor)
+            elif self.search_latch in ('search_reverse_right', 'search_reverse_left'):
+                try:
+                    move.backward(SEARCH_REVERSE_SPEED)
+                    self._current_speed = -SEARCH_REVERSE_SPEED
+                except Exception as e:
+                    self._motor_stop()
+
+        elif self.line_follow_active and fresh and any_band:
+            # --- MODO NORMAL (AVANZAR) ---
+            # (Toda tu lógica de cálculo de velocidad del PID queda aquí)
+            
             ref_err = None
             if hn and en is not None:
                 ref_err = float(en)
@@ -542,7 +594,6 @@ class Functions(threading.Thread):
                         (DRIVE_MAX_SPEED - DRIVE_BASE_SPEED) * (1.0 - k))
                 base = max(base, MIN_MOVE_SPEED)
 
-            # recortes suaves por mid/far (opcionales)
             cut_mid = cut_far = 0
             if hm and em is not None:
                 k_mid = max(0.0, min(1.0, abs(float(em)) / float(MID_ERR_SLOW_THRESH)))
@@ -551,53 +602,37 @@ class Functions(threading.Thread):
                 k_far = max(0.0, min(1.0, abs(float(ef)) / float(FAR_ERR_SLOW_THRESH)))
                 cut_far = int(CUT_FAR_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_far)
 
-            # --- recorte por "descentramiento" de cualquiera de las 3 bandas bajas (2,3,4) ---
             errs_abs = []
-            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) >= 5 and len(hasl) >= 5:
-                for i in (2, 3, 4):  # far-medio-cerca inferiores
+            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) >= 5 and len(hasl) >= 5: # Asume 5 o 10 bandas
+                num_bands_to_check = len(errs) // 2 # Chequea la mitad inferior
+                start_index = len(errs) - num_bands_to_check
+                for i in range(start_index, len(errs)):
                     if hasl[i] and errs[i] is not None:
                         off = abs(float(errs[i]))
-                        # deadband para no castigar micro-desalineaciones
                         off = max(0.0, off - float(BOTTOM_CENTER_DEADBAND_PX))
                         errs_abs.append(off)
 
             extra_cut = 0
             if errs_abs:
-                # si cualquiera se aleja, recortamos (uso el máximo para ser conservador)
                 max_off  = max(errs_abs)
                 k_center = max(0.0, min(1.0, max_off / float(BOTTOM_CENTER_SLOW_THRESH_PX)))
                 extra_cut = int(BOTTOM_CENTER_CUT_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_center)
 
             desired = base - (cut_mid + cut_far + extra_cut)
 
-            if self.search_latch is not None:
-                # (opcional) corta la búsqueda si excede el tiempo máx.
-                if hasattr(self, 'search_started_t') and (now - self.search_started_t) > SEARCH_TURN_MAX_TIME_S:
-                     self.search_latch = None  # suelta por timeout de seguridad
-                desired = min(desired, SEARCH_TURN_SPEED)
-
-
-            # Si NO hay NEAR pero sí otras → aseguremos avance mínimo
             if not hn:
                 desired = max(desired, ANY_BAND_MIN_SPEED)
-
+            
             self._no_line_frames = 0
             self._set_target_speed(int(max(MIN_MOVE_SPEED, desired)))
-            self._ramp_and_drive()
-        else:
-            # Sin línea visible:
-            if self.search_latch is not None:
-                # Seguimos avanzando lento mientras buscamos
-                self._no_line_frames = 0
-                self._set_target_speed(int(max(MIN_MOVE_SPEED, SEARCH_TURN_SPEED)))
-                self._ramp_and_drive()
-            else:
-                # Parada segura tras N frames sin nada que ver
-                self._no_line_frames += 1
-                if self._no_line_frames >= NO_LINE_STOP_FRAMES:
-                    self._set_target_speed(0)
-                    self._ramp_and_drive()
+            self._ramp_and_drive() # ¡Aquí SÍ usamos la rampa!
 
+        else:
+            # --- MODO PARADA (Sin línea Y sin búsqueda) ---
+            self._no_line_frames += 1
+            if self._no_line_frames >= NO_LINE_STOP_FRAMES:
+                self._set_target_speed(0)
+                self._ramp_and_drive() # Parada con rampa
 
         # 6) Memorias para próxima iteración
         if hn and en is not None:
