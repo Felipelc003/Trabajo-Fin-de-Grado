@@ -14,7 +14,7 @@ BLACK_PROFILE = {
     "hsv_upper": (179, 255, 120),
     "otsu_invert": True,
 }
-
+"""
 WHITE_PROFILE = {
     "hsv_lower": (0, 0, 160),
     "hsv_upper": (179, 70, 255),
@@ -32,6 +32,27 @@ YELLOW_PROFILE = {
     "hsv_upper": (50, 255, 110),
     "otsu_invert": False, # Las líneas claras no invierten Otsu
 }
+"""
+WHITE_PROFILE = {
+    "hsv_lower": (100, 100, 90),
+    "hsv_upper": (111, 182, 145),
+    "otsu_invert": False,
+}
+
+# ROJO (Tus valores exactos)
+# Detecta cualquier tono (H 0-179) pero MUY OSCURO (V 40-75) y saturado
+RED_PROFILE = {
+    "hsv_lower": (0, 126, 56),
+    "hsv_upper": (100, 255, 90),
+    "otsu_invert": False, 
+}
+
+# AMARILLO (Sin cambios, o usa los que te funcionen)
+YELLOW_PROFILE = {
+    "hsv_lower": (20, 50, 50),
+    "hsv_upper": (60, 190, 80),
+    "otsu_invert": False,
+}
 
 # ==========================
 # Parámetros por bandas
@@ -40,7 +61,7 @@ Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.80), (0.80, 1.00)]
 N_BANDS = 5
 BAND_ENABLED = [False, False, True, True, True]
 MIN_AREAS = [210, 240, 270, 300, 330]
-KERNEL_SIZES = [3, 3, 3, 4, 4]
+KERNEL_SIZES = [3, 3, 4, 4, 3]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -48,6 +69,7 @@ MAX_STEP_X = [30, 25, 22, 18, 9999]
 W_EMA = 0.6
 WIDEN_STEP = 40
 MAX_WIDEN = 120
+MAX_BAND_JUMP = 100  # Máximo salto lateral permitido (en px) entre bandas consecutivas
 
 FORCE_NEAR_VERTICAL = False
 NEAR_LEN, NEAR_MIN_W, NEAR_MAX_W = 140, 10, 70
@@ -122,19 +144,7 @@ def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False
 # Helpers de máscaras
 # ==========================
 def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    m_hsv = cv2.inRange(
-        roi_hsv,
-        np.array((0, 0, 190), np.uint8),
-        np.array((179, 90, 255), np.uint8)
-    )
-    m_adapt = cv2.adaptiveThreshold(
-        roi_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, -5
-    )
-    m = cv2.bitwise_or(m_hsv, m_adapt)
-    ker = np.ones((ksize, ksize), np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
-    return m
+    return _mask_from_profile(roi_hsv, roi_gray, WHITE_PROFILE, ksize=ksize)
 
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
@@ -157,27 +167,34 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     return m
 
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    # Rango 1 (bajos H) - Exigimos S > 100
-    lower1 = np.array([0, 100, 80])
-    upper1 = np.array([10, 255, 255])
+    # --- PARTE 1: Rango Rojo Bajo (0-10) ---
+    # Usamos tus valores de S y V, pero limitamos H a 0-10
+    # He subido el V max a 100 para darle margen si hay más luz
+    lower1 = np.array([0, 153, 40])
+    upper1 = np.array([10, 255, 100]) # <--- V subido a 100 por seguridad
     mask1 = cv2.inRange(roi_hsv, lower1, upper1)
     
-    # Rango 2 (altos H) - Exigimos S > 100
-    lower2 = np.array([170, 100, 80])
-    upper2 = np.array([179, 255, 255])
+    # --- PARTE 2: Rango Rojo Alto (170-179) ---
+    lower2 = np.array([170, 153, 40])
+    upper2 = np.array([179, 255, 100]) # <--- V subido a 100
     mask2 = cv2.inRange(roi_hsv, lower2, upper2)
     
-    m_hsv = cv2.bitwise_or(mask1, mask2) # Máscara de color
+    # Unimos las dos partes del rojo
+    m_hsv = cv2.bitwise_or(mask1, mask2)
 
-    # --- AÑADIMOS OTSU DE VUELTA ---
+    # --- PARTE 3: Combinar con Otsu (Opcional pero recomendado) ---
+    # Si la línea roja se ve muy oscura, Otsu normal podría fallar si el suelo es más claro.
+    # Vamos a confiar PRINCIPALMENTE en el color (HSV) que has calibrado.
+    # Pero si quieres robustez extra, usamos OR con Otsu.
+    
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
-    # Usamos Otsu normal (NO inverso) porque la línea roja es más "clara" que el fondo
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-    # Usamos AND: Debe ser roja (HSV) Y ser parte del objeto (Otsu)
+    
+    # Lógica OR: Es rojo (por color) O tiene mucho contraste
+    # (Nota: Si Otsu te da problemas detectando el suelo, cambia esto a 'return m_hsv')
     m = cv2.bitwise_or(m_hsv, m_otsu)
-    # --- FIN DE LA ADICIÓN ---
 
+    # Limpieza
     ker = np.ones((ksize, ksize), np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
@@ -427,6 +444,17 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
             corridor_half=half_eff,
             draw_overlays=draw_overlays, overlay=overlay
         )
+
+        # --- NUEVO FILTRO DE CONTINUIDAD ---
+        # Si hemos encontrado algo, verificamos que no haya dado un "salto cuántico"
+        # respecto a la banda anterior (corridor_center).
+        if found and corridor_center is not None and cx is not None:
+            dist = abs(cx - corridor_center)
+            if dist > MAX_BAND_JUMP:
+                # ¡Salto imposible detected! Es ruido.
+                found = False # Lo marcamos como NO encontrado
+                chosen = None # Borramos el color para que no pinte
+        # --- FIN DEL FILTRO ---
         color_list[i] = chosen
 
         if not found:
@@ -547,6 +575,18 @@ def _run_line_with_profile(frame: np.ndarray, profile: dict, draw_overlays: bool
             continue
 
         cx_abs = int(cx_r)
+
+        if corridor_center is not None:
+            dist = abs(cx_abs - corridor_center)
+            if dist > MAX_BAND_JUMP:
+                # Marcamos como no encontrado y continuamos al bloque de 'fallo'
+                results[i] = {'found': False, 'cx': None, 'cy': None, 'band': (y1, y2), 'w_used': None}
+                widen += WIDEN_STEP
+                # Dibujar caja vacía si es necesario (opcional, copiado del bloque de fallo anterior)
+                if draw_overlays and overlay is not None and ROW_MODE:
+                     # ... (código de dibujo de caja vacía) ...
+                     pass
+                continue
 
         if _SW_PREV_CX[i] is not None:
             dx = cx_abs - _SW_PREV_CX[i]

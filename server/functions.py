@@ -21,14 +21,14 @@ SERVO_STEERING = 2
 STEER_RIGHT        = 50
 STEER_CENTER       = 88.5   # calibra "recto" real
 STEER_LEFT         = 120
-K_STEER            = 0.10  # deg/px (invierte a -0.08 si gira al revés)
-KD_STEER           = 0.04  # Ganancia Derivativa
+K_STEER            = 0.065  # deg/px (invierte a -0.08 si gira al revés)
+KD_STEER           = 0.15  # Ganancia Derivativa
 KI_STEER           = 0.01  # Ganancia Integral
 
 # Velocidades
-DRIVE_BASE_SPEED    = 40
-DRIVE_MAX_SPEED     = 45
-MIN_MOVE_SPEED      = 30    # vencer rozamiento
+DRIVE_BASE_SPEED    = 35
+DRIVE_MAX_SPEED     = 40
+MIN_MOVE_SPEED      = 25    # vencer rozamiento
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -43,8 +43,10 @@ ERR_STOP_THRESH_PX  = 160   # |err| > esto → casi parar
 NO_LINE_STOP_FRAMES = 5
 
 # Rampa y frecuencia de órdenes
-RAMP_STEP           = 7
-RAMP_HZ_LIMIT       = 12.0  # Hz máximos de envío de órdenes al motor
+# RAMP_STEP           = 7   <-- BORRA O COMENTA ESTA LÍNEA
+RAMP_STEP_UP          = 1   # Aceleración LENTA (1 unidad por ciclo)
+RAMP_STEP_DOWN        = 10  # Frenada RÁPIDA (10 unidades por ciclo, casi instantánea)
+RAMP_HZ_LIMIT         = 15.0  # Hz máximos de envío de órdenes al motor
 
 # Depuración (sube para menos logs; 0 = silencio)
 DEBUG_DRIVE_LOG_EVERY = 0.0
@@ -58,7 +60,7 @@ PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 MID_ERR_SLOW_THRESH = 100
 FAR_ERR_SLOW_THRESH = 130
 CUT_MID_FRAC = 0.15  # máx 15% extra por mid
-CUT_FAR_FRAC = 0.15  # máx 15% extra por far
+CUT_FAR_FRAC = 0.30  # máx 15% extra por far
 
 # --- Mínimo seguro si sólo tenemos bandas superiores ---
 SAFE_MIN_WHEN_FAR_ONLY = 32
@@ -69,7 +71,7 @@ MID_PRESTEER_DEG  = 6   # si mid también la ve → suma ±10°
 NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
 
 # Limitador de velocidad de giro del servo (suaviza cambios bruscos)
-STEER_SLEW_DEG_PER_SEC = 90  # máx grados/seg que puede cambiar el servo
+STEER_SLEW_DEG_PER_SEC = 60  # máx grados/seg que puede cambiar el servo
 
 FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
 
@@ -181,22 +183,33 @@ class Functions(threading.Thread):
             return
         self._last_drive_time = now
 
-        # rampa hacia el objetivo
         if self._current_speed < self._target_speed:
-            self._current_speed = min(self._current_speed + RAMP_STEP, self._target_speed)
+            # ESTAMOS ACELERANDO
+            
+            # 1. Si estamos por debajo de la mínima (o parados), saltamos a la mínima
+            if self._current_speed < MIN_MOVE_SPEED:
+                self._current_speed = MIN_MOVE_SPEED
+            
+            # 2. Si ya nos movemos, subimos suavemente (Rampa Lenta)
+            else:
+                self._current_speed = min(self._current_speed + RAMP_STEP_UP, self._target_speed)
+        
         elif self._current_speed > self._target_speed:
-            self._current_speed = max(self._current_speed - RAMP_STEP, self._target_speed)
+            # ESTAMOS FRENANDO: Usamos paso grande (Rampa Rápida)
+            self._current_speed = max(self._current_speed - RAMP_STEP_DOWN, self._target_speed)
 
+        # --- APLICAR AL MOTOR ---
         v = int(self._current_speed)
 
-        if (not self.line_follow_active) or v <= 0:
+        # Si la velocidad es muy baja (menor que la mínima para moverse) y el target es 0, paramos.
+        # (Mantenemos un pequeño margen para no cortar en seco si estamos frenando suave)
+        if (not self.line_follow_active) or (v < MIN_MOVE_SPEED and self._target_speed == 0):
             self._motor_stop()
             return
+
         try:
-            move.forward(v)  # tu move.py usa forward(speed)
+            move.forward(v)
         except Exception as e:
-            # Evita spam si el motor no está listo en algún ciclo
-            # print("[drive] forward() falló:", e)
             self._motor_stop()
 
     def _steer_from_err(self, err_px: int):

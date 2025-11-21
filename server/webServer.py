@@ -67,7 +67,7 @@ def camera_mode(mode: str):
 # =================== Utilidades ===================
 def servoPosInit():
     """Centra dirección, pan y tilt."""
-    RPIservo.move(SERVO_STEERING, 90)
+    RPIservo.move(SERVO_STEERING, 88.5)
     RPIservo.move(SERVO_TILT, 67)
 
 def wifi_check():
@@ -215,17 +215,17 @@ def robotCtrl(command_input, response):
 
     elif 'TS' in command_input:  # Straight steering
         turn_command = 'no'
-        RPIservo.move(SERVO_STEERING, 95)
+        RPIservo.move(SERVO_STEERING, 88.5)
         if RL: RL.front_all_off()
 
     elif command_input == 'left':
         turn_command = 'left'
-        RPIservo.move(SERVO_STEERING, 125)
+        RPIservo.move(SERVO_STEERING, 120)
         if RL: RL.front_turn_left()  # en tu clase ahora pone blanco
 
     elif command_input == 'right':
         turn_command = 'right'
-        RPIservo.move(SERVO_STEERING, 60)
+        RPIservo.move(SERVO_STEERING, 50)
         if RL: RL.front_turn_right()  # blanco
 
     elif command_input == 'up':
