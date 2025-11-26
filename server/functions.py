@@ -15,6 +15,7 @@ import numpy as np  # <-- NECESARIO para np.sign
 # Constantes de dirección/marcha
 # -----------------------------
 SERVO_TILT = 0
+SERVO_PAN = 1
 SERVO_STEERING = 2
 
 # Dirección (ajusta a tu coche)
@@ -25,10 +26,22 @@ K_STEER            = 0.065  # deg/px (invierte a -0.08 si gira al revés)
 KD_STEER           = 0.15  # Ganancia Derivativa
 KI_STEER           = 0.01  # Ganancia Integral
 
+# --- CONFIGURACIÓN SERVO PAN (CÁMARA) ---
+PAN_CENTER         = 85     # Ángulo central (mirando al frente)
+PAN_MAX_LEFT       = 170    # Límite físico
+PAN_MAX_RIGHT      = 10
+
+# --- AJUSTES DE SUAVIZADO ---
+PAN_KP             = 0.025  # BAJAMOS de 0.06 a 0.035 (Más suave)
+PAN_RETURN_SPEED   = 2
+PAN_TO_STEER_GAIN  = 0.8   # Bajamos un poco el acople con las ruedas
+PAN_DEADBAND       = 15     # NUEVO: Si el error es < 10px, la cámara NO se mueve (evita temblores)
+PAN_MAX_STEP       = 1.0    # NUEVO: Máx grados que puede girar por ciclo (evita saltos bruscos)
+
 # Velocidades
 DRIVE_BASE_SPEED    = 35
 DRIVE_MAX_SPEED     = 40
-MIN_MOVE_SPEED      = 25    # vencer rozamiento
+MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -134,6 +147,10 @@ class Functions(threading.Thread):
         self._line_last_seq = None
         self._last_debug_log = 0.0
 
+        self._pan_angle = float(PAN_CENTER)
+        self._pan_active = False  # False = Fija en 90, True = Siguiendo línea
+        self._pan_trigger_count = 0
+
         # Evento para pausar/reanudar el bucle del hilo
         self.__flag = threading.Event()
         self.__flag.clear()
@@ -155,6 +172,13 @@ class Functions(threading.Thread):
         self._pid_last_time = time.time()
 
         # Motores listos
+
+        try:
+            RPIservo.move(SERVO_PAN, int(self._pan_angle))
+            RPIservo.move(SERVO_TILT, 50)
+        except:
+            pass
+
         try:
             if hasattr(move, "setup"):
                 move.setup()
@@ -251,6 +275,49 @@ class Functions(threading.Thread):
         self._servo_last_angle = target_deg
         self._servo_last_time  = now
         return target_deg
+
+    def _update_pan_servo(self, error_px):
+        """
+        Mueve la cámara basándose en el error visual.
+        Actúa como un integrador: Mientras haya error, la cámara sigue girando.
+        Si error es 0, la cámara mantiene su ángulo actual (NO vuelve al centro).
+        """
+        # Constantes locales para ajuste fino
+        PAN_GAIN = 0.04      # Velocidad de giro de la cámara
+        PAN_MAX_STEP = 3.0   # Máximo grados por frame (suavizado)
+        PAN_DEADBAND = 10    # Si el error es pequeño, no mover
+
+        if error_px is None:
+            # Si no hay línea, NO HACEMOS NADA. 
+            # Nos quedamos mirando donde estábamos (Memoria).
+            return (self._pan_angle - PAN_CENTER)
+
+        # 1. Zona muerta (Deadband)
+        if abs(float(error_px)) < PAN_DEADBAND:
+            return (self._pan_angle - PAN_CENTER)
+
+        # 2. Calcular cuánto queremos girar
+        # Error positivo (línea a la izq) -> Sumar ángulo
+        delta = float(error_px) * PAN_GAIN
+
+        # 3. Limitar la velocidad (Slew Rate)
+        if delta > PAN_MAX_STEP: delta = PAN_MAX_STEP
+        elif delta < -PAN_MAX_STEP: delta = -PAN_MAX_STEP
+
+        # 4. Aplicar al ángulo actual (ACUMULATIVO)
+        self._pan_angle += delta
+
+        # 5. Límites físicos del servo
+        self._pan_angle = max(PAN_MAX_RIGHT, min(PAN_MAX_LEFT, self._pan_angle))
+
+        # 6. Mover servo
+        try:
+            RPIservo.move(SERVO_PAN, int(self._pan_angle))
+        except:
+            pass
+
+        # Devolvemos cuánto estamos girados respecto al centro
+        return (self._pan_angle - PAN_CENTER)
 
     def _filter_mix_err(self, err):
         """
@@ -362,6 +429,12 @@ class Functions(threading.Thread):
         except Exception:
             pass
 
+        self._pan_angle = float(PAN_CENTER) # Reseteamos la variable interna
+        try:
+            RPIservo.move(SERVO_PAN, int(PAN_CENTER)) # Movemos el físico
+        except:
+            pass
+
         # Activar visión
         try:
             cam = Camera.get_instance()
@@ -404,12 +477,10 @@ class Functions(threading.Thread):
 
     def trackLineProcessing(self):
         """
-        Dirección = mezcla ponderada de 5 ventanas + anticipación + pre-giro por bandas.
-        Velocidad = avanza SIEMPRE que al menos una banda vea línea.
-        Con latch de búsqueda: si se pierde NEAR, gira hacia el último lado visto
-        hasta que NEAR reaparezca y su |error| empiece a bajar.
+        Lógica: Cámara Fija Resistente.
+        Solo activa seguimiento si la línea está en el borde (>110px) durante 3 frames seguidos.
         """
-        # 1) Productor (cámara)
+        # 1) Productor
         try:
             cam = Camera.get_instance()
             cvp = cam.cv_thread
@@ -417,249 +488,199 @@ class Functions(threading.Thread):
             time.sleep(0.1)
             return
 
-        # 2) Esperar medición NUEVA
+        # 2) Esperar medición
         st, seq = cvp.get_line_state(wait_new=True, last_seq=self._line_last_seq, timeout=0.25)
         self._line_last_seq = seq
 
         # 3) Datos
         now = time.time()
         fresh = (now - st.get('timestamp', 0)) < FRESH_TIMEOUT_SEC
-
-        errs = st.get('errs')        # lista 5 (0=top..4=bottom)
-        hasl = st.get('has_list')    # lista booleana 5
-        en   = st.get('err_near', st.get('err', None))
-        em   = st.get('err_mid',  None)
-        ef   = st.get('err_far',  None)
-        hn   = st.get('has_near', en is not None)
-        hm   = st.get('has_mid',  em is not None)
-        hf   = st.get('has_far',  ef is not None)
-
+        errs, hasl = st.get('errs'), st.get('has_list')
+        en, hn = st.get('err_near', st.get('err', None)), st.get('has_near', False)
         any_band = isinstance(hasl, list) and any(hasl)
 
-        # 3.a) Actualizar "último lado" visto por NEAR
-        # Recordatorio: err = center_x - cx  → err>0 => línea a la IZQUIERDA (cx a la izquierda)
+        # 3.a) Actualizar memoria visual
         if hn and en is not None:
+            self.last_near_err = float(en)
             self.last_near_side = 'left' if float(en) > 0 else 'right'
-            self.last_near_err  = float(en)  # asegura que se actualiza
 
-        # 3.b) Lógica de LATCH de búsqueda
-        # Activa latch sólo cuando NO hay NEAR y la última vez estaba en el BORDE
-        if (self.search_latch is None) and (self.last_near_side in ('left', 'right')):
-            cond_perdida = (not hn) or (not any_band)
-            if cond_perdida:
-                # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
-                if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
-                    if self.last_near_side == 'left':
-                        self.search_latch = 'search_forward_left'
-                    else:
-                        self.search_latch = 'search_forward_right'
+        # ---------------------------------------------------------
+        # 3.b) DISPARO DE EMERGENCIA (MANIOBRA REVERSA)
+        # ---------------------------------------------------------
+        if self.search_latch is None:
+            panic_mode = None
+            # Límites físicos de giro (35-135)
+            if self._pan_angle > 135: 
+                panic_mode = 'search_reverse_left'
+            elif self._pan_angle < 35:
+                panic_mode = 'search_reverse_right'
 
-                    self.search_debounce = 0
-                    self.search_started_t = now  # para límite de tiempo
-
-        # 3.c) Lógica de LATCH (TRANSICIÓN Y SALIDA)
-        if self.search_latch is not None:
+            if panic_mode is not None:
+                print(f"[Functions] PÁNICO FÍSICO ({self._pan_angle:.0f}°). REVERSA.")
+                self.search_latch = panic_mode
+                self.search_debounce = 0
+                self.search_started_t = now
             
-            # Condición de SALIDA (Línea centrada)
-            if hn and en is not None and (abs(float(en)) < SEARCH_REACQUIRE_CENTER_PX):
+            elif not any_band:
+                # Si perdemos la línea totalmente, buscamos hacia donde mira la cámara
+                side = 'left' if self._pan_angle > PAN_CENTER else 'right'
+                self.search_latch = f'search_forward_{side}' 
+                self.search_debounce = 0
+                self.search_started_t = now
+
+        # ---------------------------------------------------------
+        # 3.c) SALIDA DE EMERGENCIA
+        # ---------------------------------------------------------
+        if self.search_latch is not None:
+            # Salida: Cámara segura (80-100) y línea visible
+            if (80 < self._pan_angle < 100) and any_band:
                 self.search_debounce += 1
                 if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
-                    self.search_latch = None  # ¡LATCH SUELTO! (Sale de la búsqueda)
-                    self.search_debounce = 0
-                    self._motor_stop() # Paramos motores inmediatamente
-                    
-            # Condición de TRANSICIÓN (Timeout Etapa 1 -> Etapa 2)
-            elif self.search_latch in ('search_forward_left', 'search_forward_right'):
-                if (now - self.search_started_t) > SEARCH_FORWARD_TIMEOUT_S:
-                    # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
-                    if self.search_latch == 'search_forward_left':
-                        self.search_latch = 'search_reverse_left'
-                    else:
-                        self.search_latch = 'search_reverse_right'
-                
-                # Si vemos la línea pero no está centrada, reseteamos debounce
-                if hn:
-                    self.search_debounce = 0
-                    
-            # Si estamos buscando (en cualquier etapa) y no vemos la línea
-            elif not hn:
-                self.search_debounce = 0
-
-        # 4) Dirección base
-        servo_base = None
-        mix_err = None
-
-        # 4.a) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
-        if self.search_latch is not None:
-
-           # Etapa 1: Búsqueda ADELANTE (Gira HACIA el lado perdido)
-            if self.search_latch == 'search_forward_right':
-                servo_cmd = STEER_RIGHT
-            elif self.search_latch == 'search_forward_left':
-                servo_cmd = STEER_LEFT
-                
-            # Etapa 2: Búsqueda REVERSA (Gira OPUESTO al lado perdido)
-            elif self.search_latch == 'search_reverse_right':
-                servo_cmd = STEER_LEFT
-            elif self.search_latch == 'search_reverse_left':
-                servo_cmd = STEER_RIGHT
-                
-            servo_pos = self._steer_command(servo_cmd)
-        else:
-
-            # 4.b) Dirección por mezcla de 5 ventanas con pesos WIN_WEIGHTS
-            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
-                acc = 0.0; wsum = 0.0
-                for i, e in enumerate(errs):
-                    if e is not None and hasl[i]:
-                        acc  += WIN_WEIGHTS[i] * float(e)
-                        wsum += WIN_WEIGHTS[i]
-                if wsum > 0:
-                    mix_err = acc / wsum
-                    # anticipación: diferencia bottom-top (4 - 0)
-                    e_top    = float(errs[0]) if (hasl[0] and errs[0] is not None) else mix_err
-                    e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
-                    grad = e_bottom - e_top
-                    mix_err = mix_err + PRED_GAIN * grad
-                    mix_err = self._filter_mix_err(mix_err)
-
-            if mix_err is None:
-                servo_base = STEER_CENTER
+                    self.search_latch = None 
+                    self._motor_stop()
+                    # Resetear estado híbrido al recuperar
+                    self._pan_active = False 
+                    self._pan_trigger_count = 0
+                    self._pan_angle = PAN_CENTER
             else:
-                now = time.time()
-                dt = max(1e-3, now - self._pid_last_time)
+                self.search_debounce = 0
+                
+            if self.search_latch and (now - self.search_started_t) > 5.0:
+                 self.search_latch = None; self._motor_stop()
 
-                # --- LÓGICA PID ---
-                error = float(mix_err) # Error P
+        # ---------------------------------------------------------
+        # 4) CÁLCULO DE ÁNGULOS (Lógica Híbrida Estricta)
+        # ---------------------------------------------------------
+        
+        # A) Error Visual
+        mix_err = None
+        if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == 5 and any_band:
+            acc = 0.0; wsum = 0.0
+            for i, e in enumerate(errs):
+                if e is not None and hasl[i]:
+                    acc  += WIN_WEIGHTS[i] * float(e)
+                    wsum += WIN_WEIGHTS[i]
+            if wsum > 0:
+                mix_err = acc / wsum
 
-                # Término I (con "anti-windup": si no hay línea, resetea)
-                if not any_band:
-                    self._pid_integral = 0.0
+        # B) GESTIÓN DEL SERVO PAN
+        # Umbrales más estrictos para que NO se mueva en curvas suaves
+        PAN_TRIGGER_PX = 110  # Solo activa si error > 110 (muy al borde)
+        PAN_RESET_PX   = 30   # Desactiva si error < 30 (bien centrado)
+        TRIGGER_FRAMES = 3    # Debe mantenerse en el borde 3 frames seguidos
+        
+        err_val = float(mix_err) if mix_err is not None else 0.0
+
+        if self.search_latch is not None:
+            # MODO BÚSQUEDA: Cámara siempre activa
+            self._update_pan_servo(mix_err)
+            
+        else:
+            # MODO CONDUCCIÓN
+            if not self._pan_active:
+                # --- ESTADO FIJO (90°) ---
+                
+                # Solo activamos si el error es GRANDE y PERSISTENTE
+                if abs(err_val) > PAN_TRIGGER_PX:
+                    self._pan_trigger_count += 1
                 else:
-                    self._pid_integral += error * dt
-                    self._pid_integral = max(-100.0, min(100.0, self._pid_integral)) # Límite
+                    self._pan_trigger_count = 0 # Reset si vuelve a zona segura
+                
+                if self._pan_trigger_count >= TRIGGER_FRAMES:
+                    self._pan_active = True
+                    # print(">> CÁMARA LIBERADA (Línea perdiéndose)")
+                
+                # Mantener clavada en 90 mientras no esté activa
+                if not self._pan_active:
+                    if self._pan_angle != PAN_CENTER:
+                        self._pan_angle = PAN_CENTER
+                        try: RPIservo.move(SERVO_PAN, int(PAN_CENTER))
+                        except: pass
+            
+            else:
+                # --- ESTADO SEGUIMIENTO ---
+                # Condición de salida: Línea centrada Y Cámara mirando al frente
+                angle_ok = (82 < self._pan_angle < 95)
+                line_ok  = (abs(err_val) < PAN_RESET_PX)
+                
+                if angle_ok and line_ok:
+                    self._pan_active = False
+                    self._pan_trigger_count = 0
+                    self._pan_angle = PAN_CENTER
+                    try: RPIservo.move(SERVO_PAN, int(PAN_CENTER))
+                    except: pass
+                    # print("<< CÁMARA BLOQUEADA (Recuperada)")
+                else:
+                    # Seguimos rastreando
+                    self._update_pan_servo(mix_err)
 
-                # Término D
+        # C) MOVER RUEDAS
+        servo_cmd = STEER_CENTER 
+
+        if self.search_latch is not None:
+            if 'reverse' in self.search_latch:
+                if 'left' in self.search_latch: servo_cmd = STEER_RIGHT
+                else:                           servo_cmd = STEER_LEFT
+            elif 'forward' in self.search_latch:
+                if 'left' in self.search_latch: servo_cmd = STEER_LEFT
+                else:                           servo_cmd = STEER_RIGHT
+        
+        else:
+            # Acople: Si la cámara está Fija, pan_offset es 0, así que no afecta.
+            pan_offset = self._pan_angle - PAN_CENTER
+            pan_correction = pan_offset * 0.6
+            
+            pid_out = 0
+            if mix_err is not None:
+                dt = max(1e-3, now - self._pid_last_time)
+                error = float(mix_err)
+                self._pid_integral = max(-100, min(100, self._pid_integral + error * dt))
                 derivative = (error - self._pid_last_err) / dt
-
-                # Guardar para la próxima
-                self._pid_last_err = error
-                self._pid_last_time = now
-
-                # Cálculo final de dirección
+                self._pid_last_err = error; self._pid_last_time = now
                 pid_out = (K_STEER * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
 
-                # Quita el cálculo antiguo
-                # servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
-                servo_base = int(STEER_CENTER + pid_out)
+            servo_cmd = int(STEER_CENTER + pid_out + pan_correction)
 
-            # 4.c) PRE-GIRO escalonado por bandas (empieza con FAR)
-            pre_bias = 0
-            if hf and ef is not None:
-                pre_bias += int(np.sign(float(ef)) * FAR_PRESTEER_DEG)
-            if hm and em is not None:
-                pre_bias += int(np.sign(float(em)) * MID_PRESTEER_DEG)
-            if hn and en is not None:
-                pre_bias += int(np.sign(float(en)) * NEAR_PRESTEER_DEG)
+        servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_cmd))
+        self._steer_command(servo_cmd)
+        
+        # Debug para verificar estado
+        # status_cam = "ACT" if self._pan_active else "FIX"
+        # print(f"CAM: {self._pan_angle:.0f}° [{status_cam}] | ERR: {err_val:.0f}")
 
-            if servo_base is None:
-                servo_base = STEER_CENTER
-
-            servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
-            servo_pos = self._steer_command(servo_cmd)
-
-        # 5) Velocidad
+        # ---------------------------------------------------------
+        # 5) VELOCIDAD
+        # ---------------------------------------------------------
         if self.search_latch is not None:
-            # --- MODO DE BÚSQUEDA (ETAPA 1 o 2) ---
-            self._no_line_frames = 0 # Evita la parada de pánico
-            
-            # Etapa 1: ADELANTE (usa la rampa y velocidad de búsqueda)
-            if self.search_latch in ('search_forward_right', 'search_forward_left'):
-                self._set_target_speed(SEARCH_TURN_SPEED)
-                self._ramp_and_drive()
-            
-            # Etapa 2: REVERSA (orden directa al motor)
-            elif self.search_latch in ('search_reverse_right', 'search_reverse_left'):
-                try:
-                    move.backward(SEARCH_REVERSE_SPEED)
-                    self._current_speed = -SEARCH_REVERSE_SPEED
-                except Exception as e:
-                    self._motor_stop()
+            self._no_line_frames = 0
+            if 'reverse' in self.search_latch:
+                try: move.backward(SEARCH_REVERSE_SPEED); self._current_speed = -SEARCH_REVERSE_SPEED
+                except: self._motor_stop()
+            elif 'forward' in self.search_latch:
+                self._set_target_speed(SEARCH_TURN_SPEED); self._ramp_and_drive()
 
         elif self.line_follow_active and fresh and any_band:
-            # --- MODO NORMAL (AVANZAR) ---
-            # (Toda tu lógica de cálculo de velocidad del PID queda aquí)
-            
-            ref_err = None
-            if hn and en is not None:
-                ref_err = float(en)
-            elif mix_err is not None:
-                ref_err = float(mix_err)
-            else:
-                ref_err = 0.0
-
+            ref_err = float(en) if (hn and en) else (float(mix_err) if mix_err else 0.0)
             abs_ref = abs(ref_err)
-            if abs_ref >= ERR_STOP_THRESH_PX:
-                base = max(0, int(DRIVE_BASE_SPEED * 0.2))
+            if abs_ref >= ERR_STOP_THRESH_PX: base = int(DRIVE_BASE_SPEED * 0.2)
             else:
                 k = max(0.0, min(1.0, abs_ref / float(ERR_SLOW_THRESH_PX)))
-                base = int(DRIVE_BASE_SPEED +
-                        (DRIVE_MAX_SPEED - DRIVE_BASE_SPEED) * (1.0 - k))
-                base = max(base, MIN_MOVE_SPEED)
-
-            cut_mid = cut_far = 0
-            if hm and em is not None:
-                k_mid = max(0.0, min(1.0, abs(float(em)) / float(MID_ERR_SLOW_THRESH)))
-                cut_mid = int(CUT_MID_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_mid)
-            if hf and ef is not None:
-                k_far = max(0.0, min(1.0, abs(float(ef)) / float(FAR_ERR_SLOW_THRESH)))
-                cut_far = int(CUT_FAR_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_far)
-
-            errs_abs = []
-            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) >= 5 and len(hasl) >= 5: # Asume 5 o 10 bandas
-                num_bands_to_check = len(errs) // 2 # Chequea la mitad inferior
-                start_index = len(errs) - num_bands_to_check
-                for i in range(start_index, len(errs)):
-                    if hasl[i] and errs[i] is not None:
-                        off = abs(float(errs[i]))
-                        off = max(0.0, off - float(BOTTOM_CENTER_DEADBAND_PX))
-                        errs_abs.append(off)
-
-            extra_cut = 0
-            if errs_abs:
-                max_off  = max(errs_abs)
-                k_center = max(0.0, min(1.0, max_off / float(BOTTOM_CENTER_SLOW_THRESH_PX)))
-                extra_cut = int(BOTTOM_CENTER_CUT_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_center)
-
-            desired = base - (cut_mid + cut_far + extra_cut)
-
-            if not hn:
-                desired = max(desired, ANY_BAND_MIN_SPEED)
+                base = int(DRIVE_BASE_SPEED + (DRIVE_MAX_SPEED - DRIVE_BASE_SPEED) * (1.0 - k))
             
+            desired = max(MIN_MOVE_SPEED, base)
             self._no_line_frames = 0
-            self._set_target_speed(int(max(MIN_MOVE_SPEED, desired)))
-            self._ramp_and_drive() # ¡Aquí SÍ usamos la rampa!
+            self._set_target_speed(int(desired))
+            self._ramp_and_drive()
 
         else:
-            # --- MODO PARADA (Sin línea Y sin búsqueda) ---
             self._no_line_frames += 1
             if self._no_line_frames >= NO_LINE_STOP_FRAMES:
-                self._set_target_speed(0)
-                self._ramp_and_drive() # Parada con rampa
+                self._set_target_speed(0); self._ramp_and_drive()
 
-        # 6) Memorias para próxima iteración
-        if hn and en is not None:
-             self.last_near_err = float(en)
-
-        # ... justo después de self._ramp_and_drive() (o al final del bloque de velocidad)
+        # 6) Actualizar HUD
         try:
-            cam = Camera.get_instance()
-            cvp = cam.cv_thread
-            # usa la velocidad actual y el último ángulo enviado (ya guardas self._servo_last_angle)
-            cvp.set_vehicle_status(self._current_speed, self._servo_last_angle)
-        except Exception:
-            pass
-
+            Camera.get_instance().cv_thread.set_vehicle_status(self._current_speed, self._servo_last_angle)
+        except: pass
 
     # --------------- Bucle del hilo ---------------
 

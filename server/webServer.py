@@ -68,7 +68,7 @@ def camera_mode(mode: str):
 def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 88.5)
-    RPIservo.move(SERVO_TILT, 67)
+    RPIservo.move(SERVO_TILT, 50)
 
 def wifi_check():
     """
