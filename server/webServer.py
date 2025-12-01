@@ -26,6 +26,7 @@ turn_command = 'no'
 
 # Servo IDs (según tu PCA9685)
 SERVO_TILT = 0
+SERVO_PAN = 1
 SERVO_STEERING = 2
 
 # =================== Luces ===================
@@ -68,7 +69,8 @@ def camera_mode(mode: str):
 def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 88.5)
-    RPIservo.move(SERVO_TILT, 50)
+    RPIservo.move(SERVO_TILT, 40)
+    RPIservo.move(SERVO_PAN, 85)
 
 def wifi_check():
     """
@@ -312,6 +314,7 @@ async def recv_msg(websocket, path):
 
             # ---- Visión por computadora ----
             elif data == 'findColor':
+                if RL: RL.front_color('black')
                 app.flask_app.modeselect('findColor')
 
             elif data == 'motionGet':

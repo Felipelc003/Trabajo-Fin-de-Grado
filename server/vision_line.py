@@ -11,7 +11,7 @@ import time
 # ==========================
 BLACK_PROFILE = {
     "hsv_lower": (0, 0, 0),
-    "hsv_upper": (179, 255, 120),
+    "hsv_upper": (179, 255, 100),
     "otsu_invert": True,
 }
 """
@@ -42,9 +42,9 @@ WHITE_PROFILE = {
 # ROJO (Tus valores exactos)
 # Detecta cualquier tono (H 0-179) pero MUY OSCURO (V 40-75) y saturado
 RED_PROFILE = {
-    "hsv_lower": (0, 126, 56),
-    "hsv_upper": (100, 255, 90),
-    "otsu_invert": False, 
+    "hsv_lower": (0, 0, 0),
+    "hsv_upper": (179, 220, 255),
+    "otsu_invert": True, 
 }
 
 # AMARILLO (Sin cambios, o usa los que te funcionen)
@@ -57,11 +57,11 @@ YELLOW_PROFILE = {
 # ==========================
 # Parámetros por bandas
 # =========================
-Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.80), (0.80, 1.00)]
+Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.65), (0.65, 1.00)]
 N_BANDS = 5
 BAND_ENABLED = [False, False, True, True, True]
-MIN_AREAS = [210, 240, 270, 300, 330]
-KERNEL_SIZES = [3, 3, 4, 4, 3]
+MIN_AREAS = [210, 240, 240, 300, 330]
+KERNEL_SIZES = [3, 3, 4, 4, 4]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -166,34 +166,40 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
+# En: vision_line.py
+
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    # --- PARTE 1: Rango Rojo Bajo (0-10) ---
-    # Usamos tus valores de S y V, pero limitamos H a 0-10
-    # He subido el V max a 100 para darle margen si hay más luz
-    lower1 = np.array([0, 153, 40])
-    upper1 = np.array([10, 255, 100]) # <--- V subido a 100 por seguridad
-    mask1 = cv2.inRange(roi_hsv, lower1, upper1)
+    # ESTRATEGIA: Color Rojo (Hue dividido) O Contraste
     
-    # --- PARTE 2: Rango Rojo Alto (170-179) ---
-    lower2 = np.array([170, 153, 40])
-    upper2 = np.array([179, 255, 100]) # <--- V subido a 100
-    mask2 = cv2.inRange(roi_hsv, lower2, upper2)
+    # 1. Rango Rojo Bajo (0-10)
+    # S > 80 para ignorar el blanco
+    lower1 = np.array([0, 80, 50])
+    upper1 = np.array([10, 255, 255])
+    m1 = cv2.inRange(roi_hsv, lower1, upper1)
+    
+    # 2. Rango Rojo Alto (160-180)
+    # S > 80 para ignorar el blanco
+    lower2 = np.array([160, 80, 50])
+    upper2 = np.array([180, 255, 255])
+    m2 = cv2.inRange(roi_hsv, lower2, upper2)
     
     # Unimos las dos partes del rojo
-    m_hsv = cv2.bitwise_or(mask1, mask2)
+    m_color = cv2.bitwise_or(m1, m2)
 
-    # --- PARTE 3: Combinar con Otsu (Opcional pero recomendado) ---
-    # Si la línea roja se ve muy oscura, Otsu normal podría fallar si el suelo es más claro.
-    # Vamos a confiar PRINCIPALMENTE en el color (HSV) que has calibrado.
-    # Pero si quieres robustez extra, usamos OR con Otsu.
-    
+    # 3. Contraste (Otsu Normal)
+    # Ayuda si la línea se ve clara sobre suelo oscuro
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    
-    # Lógica OR: Es rojo (por color) O tiene mucho contraste
-    # (Nota: Si Otsu te da problemas detectando el suelo, cambia esto a 'return m_hsv')
-    m = cv2.bitwise_or(m_hsv, m_otsu)
 
+    # 4. Combinación ROBUSTA (OR)
+    # Detectamos si es Rojo (por color) O si destaca mucho (por contraste)
+    # Pero para no comerse al blanco, filtramos el resultado de Otsu con el color
+    # Si usas OR puro se comerá el blanco.
+    # Mejor usamos: "Es Rojo (Color)" y nos apoyamos en Otsu solo para limpiar bordes.
+    
+    # Si la iluminación es mala, confiamos solo en el color dividido:
+    m = m_color
+    
     # Limpieza
     ker = np.ones((ksize, ksize), np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)

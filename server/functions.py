@@ -28,8 +28,8 @@ KI_STEER           = 0.01  # Ganancia Integral
 
 # --- CONFIGURACIÓN SERVO PAN (CÁMARA) ---
 PAN_CENTER         = 85     # Ángulo central (mirando al frente)
-PAN_MAX_LEFT       = 170    # Límite físico
-PAN_MAX_RIGHT      = 10
+PAN_MAX_LEFT       = 130    # Límite físico
+PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO ---
 PAN_KP             = 0.025  # BAJAMOS de 0.06 a 0.035 (Más suave)
@@ -39,9 +39,9 @@ PAN_DEADBAND       = 15     # NUEVO: Si el error es < 10px, la cámara NO se mue
 PAN_MAX_STEP       = 1.0    # NUEVO: Máx grados que puede girar por ciclo (evita saltos bruscos)
 
 # Velocidades
-DRIVE_BASE_SPEED    = 35
-DRIVE_MAX_SPEED     = 40
-MIN_MOVE_SPEED      = 30    # vencer rozamiento
+DRIVE_BASE_SPEED    = 32
+DRIVE_MAX_SPEED     = 38
+MIN_MOVE_SPEED      = 25    # vencer rozamiento
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -66,7 +66,7 @@ DEBUG_DRIVE_LOG_EVERY = 0.0
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.15, 0.25, 0.30, 0.20, 0.10]  # suma ≈ 1.0
+WIN_WEIGHTS = [0.00, 0.00, 0.5, 0.15, 0.80] # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -150,6 +150,7 @@ class Functions(threading.Thread):
         self._pan_angle = float(PAN_CENTER)
         self._pan_active = False  # False = Fija en 90, True = Siguiendo línea
         self._pan_trigger_count = 0
+        self._panic_start_time = None
 
         # Evento para pausar/reanudar el bucle del hilo
         self.__flag = threading.Event()
@@ -175,7 +176,7 @@ class Functions(threading.Thread):
 
         try:
             RPIservo.move(SERVO_PAN, int(self._pan_angle))
-            RPIservo.move(SERVO_TILT, 50)
+            RPIservo.move(SERVO_TILT, 40)
         except:
             pass
 
@@ -278,45 +279,53 @@ class Functions(threading.Thread):
 
     def _update_pan_servo(self, error_px):
         """
-        Mueve la cámara basándose en el error visual.
-        Actúa como un integrador: Mientras haya error, la cámara sigue girando.
-        Si error es 0, la cámara mantiene su ángulo actual (NO vuelve al centro).
+        Mueve la cámara persiguiendo el error visual con FUERZA DE RETORNO SUAVE.
         """
-        # Constantes locales para ajuste fino
-        PAN_GAIN = 0.04      # Velocidad de giro de la cámara
-        PAN_MAX_STEP = 3.0   # Máximo grados por frame (suavizado)
-        PAN_DEADBAND = 10    # Si el error es pequeño, no mover
+        PAN_GAIN = 0.05      # Subimos un poco la ganancia visual
+        PAN_MAX_STEP = 4.0   # Permitimos movimientos un poco más rápidos
+        PAN_DEADBAND = 8
+        
+        # --- AJUSTE: Fuerza de Retorno MUY SUAVE ---
+        # 0.03 es suficiente para centrarla poco a poco sin pelear con la línea
+        PAN_CENTER_FORCE = 0.03 
 
         if error_px is None:
-            # Si no hay línea, NO HACEMOS NADA. 
-            # Nos quedamos mirando donde estábamos (Memoria).
+            # Si no hay línea, volver al centro lentamente
+            center_delta = (PAN_CENTER - self._pan_angle) * 0.1
+            self._pan_angle += center_delta
+            # Clamp y Mover
+            self._pan_angle = max(PAN_MAX_RIGHT, min(PAN_MAX_LEFT, self._pan_angle))
+            try: RPIservo.move(SERVO_PAN, int(self._pan_angle))
+            except: pass
             return (self._pan_angle - PAN_CENTER)
 
-        # 1. Zona muerta (Deadband)
-        if abs(float(error_px)) < PAN_DEADBAND:
-            return (self._pan_angle - PAN_CENTER)
+        # 1. Calcular fuerza visual
+        vision_delta = 0
+        if abs(float(error_px)) > PAN_DEADBAND:
+             # --- CORRECCIÓN CRÍTICA: SIGNO POSITIVO ---
+             # Error Positivo (Izq) -> Delta Positivo (Aumentar ángulo hacia Izq)
+             vision_delta = float(error_px) * PAN_GAIN 
 
-        # 2. Calcular cuánto queremos girar
-        # Error positivo (línea a la izq) -> Sumar ángulo
-        delta = float(error_px) * PAN_GAIN
+        # 2. Calcular fuerza de retorno (Elasticidad)
+        # Si estamos en 130 (Izq), (90 - 130) = -40. Empuja a la derecha (negativo).
+        center_delta = (PAN_CENTER - self._pan_angle) * PAN_CENTER_FORCE
+        
+        # 3. Sumar fuerzas
+        total_delta = vision_delta + center_delta
 
-        # 3. Limitar la velocidad (Slew Rate)
-        if delta > PAN_MAX_STEP: delta = PAN_MAX_STEP
-        elif delta < -PAN_MAX_STEP: delta = -PAN_MAX_STEP
+        # 4. Limitar velocidad (Slew Rate)
+        if total_delta > PAN_MAX_STEP: total_delta = PAN_MAX_STEP
+        elif total_delta < -PAN_MAX_STEP: total_delta = -PAN_MAX_STEP
 
-        # 4. Aplicar al ángulo actual (ACUMULATIVO)
-        self._pan_angle += delta
-
-        # 5. Límites físicos del servo
+        # 5. Aplicar
+        self._pan_angle += total_delta
         self._pan_angle = max(PAN_MAX_RIGHT, min(PAN_MAX_LEFT, self._pan_angle))
 
-        # 6. Mover servo
         try:
             RPIservo.move(SERVO_PAN, int(self._pan_angle))
         except:
             pass
 
-        # Devolvemos cuánto estamos girados respecto al centro
         return (self._pan_angle - PAN_CENTER)
 
     def _filter_mix_err(self, err):
@@ -477,8 +486,10 @@ class Functions(threading.Thread):
 
     def trackLineProcessing(self):
         """
-        Lógica: Cámara Fija Resistente.
-        Solo activa seguimiento si la línea está en el borde (>110px) durante 3 frames seguidos.
+        Lógica: Active Gaze con Timeout de Pánico.
+        - La cámara sigue la línea.
+        - Las ruedas siguen a la cámara.
+        - Si la cámara supera el límite físico durante 5s -> Reversa.
         """
         # 1) Productor
         try:
@@ -505,26 +516,38 @@ class Functions(threading.Thread):
             self.last_near_side = 'left' if float(en) > 0 else 'right'
 
         # ---------------------------------------------------------
-        # 3.b) DISPARO DE EMERGENCIA (MANIOBRA REVERSA)
+        # 3.b) LÓGICA DE DISPARO (TEMPORIZADOR DE 5 SEGUNDOS)
         # ---------------------------------------------------------
         if self.search_latch is None:
-            panic_mode = None
-            # Límites físicos de giro (35-135)
-            if self._pan_angle > 135: 
-                panic_mode = 'search_reverse_left'
-            elif self._pan_angle < 35:
-                panic_mode = 'search_reverse_right'
-
-            if panic_mode is not None:
-                print(f"[Functions] PÁNICO FÍSICO ({self._pan_angle:.0f}°). REVERSA.")
-                self.search_latch = panic_mode
-                self.search_debounce = 0
-                self.search_started_t = now
             
-            elif not any_band:
-                # Si perdemos la línea totalmente, buscamos hacia donde mira la cámara
+            # 1. Comprobar si la cámara está forzada más allá de las ruedas
+            # Asumimos STEER_LEFT=120 y STEER_RIGHT=50 (Ajusta a tus topes reales)
+            is_over_limit_left  = (self._pan_angle > 120)
+            is_over_limit_right = (self._pan_angle < 50)
+            
+            if is_over_limit_left or is_over_limit_right:
+                # Si acabamos de entrar en zona crítica, iniciamos el cronómetro
+                if self._panic_start_time is None:
+                    self._panic_start_time = now
+                
+                # Chequeamos cuánto tiempo llevamos aquí
+                elapsed = now - self._panic_start_time
+                if elapsed > 5.0:
+                    # ¡Han pasado 5 segundos y seguimos atascados! -> ACTIVAR MANIOBRA
+                    side = 'left' if is_over_limit_left else 'right'
+                    print(f"[Func] PÁNICO: Cámara forzada a {side} por >5s. REVERSA.")
+                    self.search_latch = f'search_reverse_{side}'
+                    self.search_debounce = 0
+                    self.search_started_t = now
+                    self._panic_start_time = None # Reset cronómetro
+            else:
+                # Si la cámara vuelve a zona segura, reseteamos el cronómetro
+                self._panic_start_time = None
+
+            # 2. Pérdida visual total (Fallback)
+            if not any_band and self.search_latch is None:
                 side = 'left' if self._pan_angle > PAN_CENTER else 'right'
-                self.search_latch = f'search_forward_{side}' 
+                self.search_latch = f'search_forward_{side}'
                 self.search_debounce = 0
                 self.search_started_t = now
 
@@ -532,24 +555,24 @@ class Functions(threading.Thread):
         # 3.c) SALIDA DE EMERGENCIA
         # ---------------------------------------------------------
         if self.search_latch is not None:
-            # Salida: Cámara segura (80-100) y línea visible
-            if (80 < self._pan_angle < 100) and any_band:
+            # Salida: Cámara segura (80-100) y línea visible y centrada
+            camera_safe = (80 < self._pan_angle < 100)
+            line_centered = (abs(float(en)) < SEARCH_REACQUIRE_CENTER_PX) if (hn and en) else False
+            
+            if any_band and camera_safe and line_centered:
                 self.search_debounce += 1
                 if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
                     self.search_latch = None 
                     self._motor_stop()
-                    # Resetear estado híbrido al recuperar
-                    self._pan_active = False 
-                    self._pan_trigger_count = 0
-                    self._pan_angle = PAN_CENTER
+                    self._pan_angle = PAN_CENTER # Reset al centro
             else:
                 self.search_debounce = 0
                 
-            if self.search_latch and (now - self.search_started_t) > 5.0:
+            if self.search_latch and (now - self.search_started_t) > 6.0:
                  self.search_latch = None; self._motor_stop()
 
         # ---------------------------------------------------------
-        # 4) CÁLCULO DE ÁNGULOS (Lógica Híbrida Estricta)
+        # 4) CÁLCULO DE ÁNGULOS (ACTIVE GAZE)
         # ---------------------------------------------------------
         
         # A) Error Visual
@@ -563,62 +586,17 @@ class Functions(threading.Thread):
             if wsum > 0:
                 mix_err = acc / wsum
 
-        # B) GESTIÓN DEL SERVO PAN
-        # Umbrales más estrictos para que NO se mueva en curvas suaves
-        PAN_TRIGGER_PX = 110  # Solo activa si error > 110 (muy al borde)
-        PAN_RESET_PX   = 30   # Desactiva si error < 30 (bien centrado)
-        TRIGGER_FRAMES = 3    # Debe mantenerse en el borde 3 frames seguidos
-        
-        err_val = float(mix_err) if mix_err is not None else 0.0
-
-        if self.search_latch is not None:
-            # MODO BÚSQUEDA: Cámara siempre activa
-            self._update_pan_servo(mix_err)
-            
-        else:
-            # MODO CONDUCCIÓN
-            if not self._pan_active:
-                # --- ESTADO FIJO (90°) ---
-                
-                # Solo activamos si el error es GRANDE y PERSISTENTE
-                if abs(err_val) > PAN_TRIGGER_PX:
-                    self._pan_trigger_count += 1
-                else:
-                    self._pan_trigger_count = 0 # Reset si vuelve a zona segura
-                
-                if self._pan_trigger_count >= TRIGGER_FRAMES:
-                    self._pan_active = True
-                    # print(">> CÁMARA LIBERADA (Línea perdiéndose)")
-                
-                # Mantener clavada en 90 mientras no esté activa
-                if not self._pan_active:
-                    if self._pan_angle != PAN_CENTER:
-                        self._pan_angle = PAN_CENTER
-                        try: RPIservo.move(SERVO_PAN, int(PAN_CENTER))
-                        except: pass
-            
-            else:
-                # --- ESTADO SEGUIMIENTO ---
-                # Condición de salida: Línea centrada Y Cámara mirando al frente
-                angle_ok = (82 < self._pan_angle < 95)
-                line_ok  = (abs(err_val) < PAN_RESET_PX)
-                
-                if angle_ok and line_ok:
-                    self._pan_active = False
-                    self._pan_trigger_count = 0
-                    self._pan_angle = PAN_CENTER
-                    try: RPIservo.move(SERVO_PAN, int(PAN_CENTER))
-                    except: pass
-                    # print("<< CÁMARA BLOQUEADA (Recuperada)")
-                else:
-                    # Seguimos rastreando
-                    self._update_pan_servo(mix_err)
+        # B) MOVER CÁMARA (Siempre persigue la línea)
+        # Esto es lo que permite "reducir grados" si el coche se centra
+        pan_offset_deg = self._update_pan_servo(mix_err)
 
         # C) MOVER RUEDAS
         servo_cmd = STEER_CENTER 
 
         if self.search_latch is not None:
+            # === MANIOBRA ===
             if 'reverse' in self.search_latch:
+                # Contravolante
                 if 'left' in self.search_latch: servo_cmd = STEER_RIGHT
                 else:                           servo_cmd = STEER_LEFT
             elif 'forward' in self.search_latch:
@@ -626,27 +604,31 @@ class Functions(threading.Thread):
                 else:                           servo_cmd = STEER_RIGHT
         
         else:
-            # Acople: Si la cámara está Fija, pan_offset es 0, así que no afecta.
-            pan_offset = self._pan_angle - PAN_CENTER
-            pan_correction = pan_offset * 0.6
+            # === CONDUCCIÓN NORMAL ===
+            # Las ruedas se calculan basándose en el giro de la cámara
+            # Factor 1.0 = Copia exacta
+            pan_correction = pan_offset_deg * 1.0
             
+            # Añadimos un poco de PID visual para ajuste fino
             pid_out = 0
             if mix_err is not None:
                 dt = max(1e-3, now - self._pid_last_time)
                 error = float(mix_err)
-                self._pid_integral = max(-100, min(100, self._pid_integral + error * dt))
+                self._pid_integral = max(-50.0, min(50.0, self._pid_integral + error * dt))
                 derivative = (error - self._pid_last_err) / dt
                 self._pid_last_err = error; self._pid_last_time = now
-                pid_out = (K_STEER * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
+                
+                # K_STEER muy bajo porque el trabajo duro lo hace la cámara
+                pid_out = (0.04 * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
 
             servo_cmd = int(STEER_CENTER + pid_out + pan_correction)
 
         servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_cmd))
         self._steer_command(servo_cmd)
         
-        # Debug para verificar estado
-        # status_cam = "ACT" if self._pan_active else "FIX"
-        # print(f"CAM: {self._pan_angle:.0f}° [{status_cam}] | ERR: {err_val:.0f}")
+        # Debug para ver si el contador avanza
+        if self._panic_start_time is not None:
+            print(f"ALERTA LIMITE: {now - self._panic_start_time:.1f}s")
 
         # ---------------------------------------------------------
         # 5) VELOCIDAD
