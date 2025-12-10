@@ -34,8 +34,8 @@ YELLOW_PROFILE = {
 }
 """
 WHITE_PROFILE = {
-    "hsv_lower": (100, 100, 90),
-    "hsv_upper": (111, 182, 145),
+    "hsv_lower": (80, 50, 170),
+    "hsv_upper": (105, 150, 255),
     "otsu_invert": False,
 }
 
@@ -49,8 +49,8 @@ RED_PROFILE = {
 
 # AMARILLO (Sin cambios, o usa los que te funcionen)
 YELLOW_PROFILE = {
-    "hsv_lower": (20, 50, 50),
-    "hsv_upper": (60, 190, 80),
+    "hsv_lower": (30, 30, 50),
+    "hsv_upper": (40, 170, 255),
     "otsu_invert": False,
 }
 
@@ -61,7 +61,7 @@ Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.65), (0.65, 1.00)]
 N_BANDS = 5
 BAND_ENABLED = [False, False, True, True, True]
 MIN_AREAS = [210, 240, 240, 300, 330]
-KERNEL_SIZES = [3, 3, 4, 4, 4]
+KERNEL_SIZES = [3, 3, 4, 4, 3]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -82,7 +82,7 @@ COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255), (0, 255, 165), (0, 255, 0)]
 FILL_RATIO_MAX = 0.32
 ELONG_MIN_NON_NEAR = 1.4
 CONTRAST_MIN_WHITE = 8.0
-CONTRAST_MIN_BLACK = 3.0
+CONTRAST_MIN_BLACK = 10.0
 FILL_RATIO_MAX_WHITE = 0.45
 FILL_RATIO_MAX_BLACK = 0.60
 
@@ -149,8 +149,8 @@ def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
         roi_hsv,
-        np.array((0, 0, 0), np.uint8),
-        np.array((179, 255, 120), np.uint8) # Un V-max de 120 es más seguro que 18
+        np.array((65, 100, 0), np.uint8),
+        np.array((110, 255, 120), np.uint8) # Un V-max de 120 es más seguro que 18
     )
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
@@ -166,7 +166,6 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
     return m
 
-# En: vision_line.py
 
 def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # ESTRATEGIA: Color Rojo (Hue dividido) O Contraste
@@ -209,8 +208,8 @@ def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # Definimos el rango HSV estricto para amarillo
     # H: 20-40, S > 100, V > 80
-    lower = np.array([25, 60, 50])
-    upper = np.array([70, 255, 255])
+    lower = np.array([30, 90, 80])
+    upper = np.array([40, 172, 255])
     
     # Aplicamos la máscara HSV
     m_hsv = cv2.inRange(roi_hsv, lower, upper)

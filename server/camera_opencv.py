@@ -52,9 +52,9 @@ class Camera(BaseCamera):
 
         try:
             self._p2.set_controls({
-                "AeEnable": False,      # Desactivar Exposición Automática
-                "AnalogueGain": 8.0,    # Aumentar sensibilidad (prueba 4.0 a 10.0)
-                "ExposureTime": 20000   # Forzar más tiempo de exposición (en microsegundos)
+                "AeEnable": True,      # Desactivar Exposición Automática
+                "AnalogueGain": 0,    # Aumentar sensibilidad (prueba 4.0 a 10.0)
+                "ExposureTime": 0   # Forzar más tiempo de exposición (en microsegundos)
             })
         except Exception as e:
             print(f"[Camera] No se pudieron ajustar controles de exposición: {e}")

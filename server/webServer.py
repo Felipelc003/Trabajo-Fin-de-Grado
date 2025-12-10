@@ -20,7 +20,7 @@ import switch
 import app
 
 # =================== Estado global ===================
-speed_set = 50
+speed_set = 70
 direction_command = 'no'
 turn_command = 'no'
 
@@ -70,7 +70,7 @@ def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 88.5)
     RPIservo.move(SERVO_TILT, 40)
-    RPIservo.move(SERVO_PAN, 85)
+    RPIservo.move(SERVO_PAN, 80)
 
 def wifi_check():
     """
@@ -279,7 +279,7 @@ async def recv_msg(websocket, path):
 
             # ---- Modo seguimiento de línea ----
             elif data == 'trackLine':
-                if RL: RL.front_color('black')
+                if RL: RL.front_color('white')
                 fuc.modeSet('trackLine')
                 camera_mode('trackline')
 
