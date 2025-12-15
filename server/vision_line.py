@@ -35,7 +35,7 @@ YELLOW_PROFILE = {
 """
 WHITE_PROFILE = {
     "hsv_lower": (80, 50, 170),
-    "hsv_upper": (105, 150, 255),
+    "hsv_upper": (105, 150, 0),
     "otsu_invert": False,
 }
 
@@ -61,7 +61,7 @@ Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.65), (0.65, 1.00)]
 N_BANDS = 5
 BAND_ENABLED = [False, False, True, True, True]
 MIN_AREAS = [210, 240, 240, 300, 330]
-KERNEL_SIZES = [3, 3, 4, 4, 3]
+KERNEL_SIZES = [3, 3, 4, 5, 5]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -149,8 +149,8 @@ def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
         roi_hsv,
-        np.array((65, 100, 0), np.uint8),
-        np.array((110, 255, 120), np.uint8) # Un V-max de 120 es más seguro que 18
+        np.array((100, 130, 0), np.uint8),
+        np.array((120, 255, 200), np.uint8) # Un V-max de 120 es más seguro que 18
     )
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
@@ -208,8 +208,8 @@ def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # Definimos el rango HSV estricto para amarillo
     # H: 20-40, S > 100, V > 80
-    lower = np.array([30, 90, 80])
-    upper = np.array([40, 172, 255])
+    lower = np.array([43, 27, 178])
+    upper = np.array([80, 170, 255])
     
     # Aplicamos la máscara HSV
     m_hsv = cv2.inRange(roi_hsv, lower, upper)

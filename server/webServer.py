@@ -70,7 +70,7 @@ def servoPosInit():
     """Centra dirección, pan y tilt."""
     RPIservo.move(SERVO_STEERING, 88.5)
     RPIservo.move(SERVO_TILT, 40)
-    RPIservo.move(SERVO_PAN, 80)
+    RPIservo.move(SERVO_PAN, 85)
 
 def wifi_check():
     """

@@ -28,17 +28,22 @@ KI_STEER           = 0.01  # Ganancia Integral
 # Velocidades
 DRIVE_BASE_SPEED    = 60    # Velocidad base en curvas cerradas
 DRIVE_MAX_SPEED     = 65    # Velocidad en rectas (default)
-MIN_MOVE_SPEED      = 55    # vencer rozamiento
+MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Velocidades por color
-SPEED_BLACK_BOOST   = 70    # Recta negra a tope (Braver)
+SPEED_BLACK_BOOST   = 80    # Recta negra a tope (Braver)
 SPEED_WHITE_NORMAL  = 50    # Normal
-SPEED_YELLOW_MAX    = 45    # Velocidad máxima amarilla
+SPEED_YELLOW_MAX    = 55    # Velocidad máxima amarilla
+YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
 
 # Maniobras (Curvas y Reversa)
-SEARCH_TURN_SPEED      = 50   # Más fuerza al girar buscando
+SEARCH_TURN_SPEED      = 40   # Más fuerza al girar buscando
 SEARCH_REVERSE_SPEED   = 50   # Más fuerza marcha atrás
+
+# Ganancia de giro específica por color
+STEER_GAIN_BLACK       = 0.15 # Antes 1/3 (~0.33). Reducido a 0.15 para suavizar
+BLACK_DEADBAND_PX      = 20   # Ignorar errores menores en recta negra
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -47,6 +52,7 @@ BOTTOM_CENTER_DEADBAND_PX    = 8     # tolerancia: ignora offsets muy pequeños
 
 # Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
 ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad
+BLACK_SLOW_THRESH_PX = 180  # Más permisivo en recta negra (frena menos)
 ERR_STOP_THRESH_PX  = 180   # |err| > esto → casi parar (más permisivo)
 
 # Parada por pérdida de línea
@@ -76,6 +82,8 @@ NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
 
 # Limitador de velocidad de giro del servo (suaviza cambios bruscos)
 STEER_SLEW_DEG_PER_SEC = 60  # máx grados/seg que puede cambiar el servo
+STEER_SLEW_RATE_BLACK  = 100  # máx grados/seg específico para línea negra
+
 
 FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
 
@@ -93,6 +101,7 @@ NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
 
 # --- Suavizado del error ---
 ERR_EMA_ALPHA     = 0.40   # 0..1 (más alto = responde más rápido)
+ERR_EMA_ALPHA_BLACK = 0.15 # Muy bajo para suavizar recta negra
 ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
 TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
 USE_TANH_SHAPING  = True   # activa compresión no lineal del error
@@ -212,14 +221,14 @@ class Functions(threading.Thread):
             pass
         return target
 
-    def _steer_command(self, target_deg: int):
+    def _steer_command(self, target_deg: int, slew_rate=STEER_SLEW_DEG_PER_SEC):
         """
         Aplica un limitador de pendiente (slew-rate) al servo para que no gire
-        más rápido de STEER_SLEW_DEG_PER_SEC. Devuelve el ángulo realmente enviado.
+        más rápido de slew_rate. Devuelve el ángulo realmente enviado.
         """
         now = time.time()
         dt = max(1e-3, now - self._servo_last_time)
-        max_step = STEER_SLEW_DEG_PER_SEC * dt
+        max_step = slew_rate * dt
 
         # clamp a los límites físicos
         target_deg = max(STEER_RIGHT, min(STEER_LEFT, int(target_deg)))
@@ -239,7 +248,7 @@ class Functions(threading.Thread):
         self._servo_last_time  = now
         return target_deg
 
-    def _filter_mix_err(self, err):
+    def _filter_mix_err(self, err, alpha=ERR_EMA_ALPHA):
         """
         Aplica deadband, EMA y compresión suave (tanh) al error combinado.
         """
@@ -254,8 +263,7 @@ class Functions(threading.Thread):
         if self._err_ema is None:
             self._err_ema = float(err)
         else:
-            a = ERR_EMA_ALPHA
-            self._err_ema = (1.0 - a) * self._err_ema + a * float(err)
+            self._err_ema = (1.0 - alpha) * self._err_ema + alpha * float(err)
         e = self._err_ema
 
         # Compresión no lineal (evita órdenes extremas de golpe)
@@ -471,14 +479,16 @@ class Functions(threading.Thread):
                 timeout_limit = SEARCH_FORWARD_TIMEOUT_S
                 if self.last_near_color == 'yellow':
                     timeout_limit = 12.0 # 12s de búsqueda si era amarilla
+                else:
+                    timeout_limit = SEARCH_FORWARD_TIMEOUT_S
 
-                if (now - self.search_started_t) > SEARCH_FORWARD_TIMEOUT_S:
+                if (now - self.search_started_t) > timeout_limit:
                     # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
                     if self.search_latch == 'search_forward_left':
                         self.search_latch = 'search_reverse_left'
                     else:
                         self.search_latch = 'search_reverse_right'
-                
+                                
                 # Si vemos la línea pero no está centrada, reseteamos debounce
                 if hn3:
                     self.search_debounce = 0
@@ -523,7 +533,10 @@ class Functions(threading.Thread):
                     e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
                     grad = e_bottom - e_top
                     mix_err = mix_err + PRED_GAIN * grad
-                    mix_err = self._filter_mix_err(mix_err)
+                    
+                    # Usar alpha suave si estamos en negro
+                    alpha_use = ERR_EMA_ALPHA_BLACK if (current_band_color == 'black') else ERR_EMA_ALPHA
+                    mix_err = self._filter_mix_err(mix_err, alpha=alpha_use)
 
             if mix_err is None:
                 servo_base = STEER_CENTER
@@ -533,6 +546,10 @@ class Functions(threading.Thread):
 
                 # --- LÓGICA PID ---
                 error = float(mix_err) # Error P
+
+                # Deadband específica para la recta negra
+                if current_band_color == 'black' and abs(error) < BLACK_DEADBAND_PX:
+                    error = 0.0
 
                 # Término I (con "anti-windup": si no hay línea, resetea)
                 if not any_band:
@@ -549,14 +566,16 @@ class Functions(threading.Thread):
                 self._pid_last_time = now
 
                 # Cálculo final de dirección
-                pid_out = (K_STEER * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
+                kd_use = 0.0 if (current_band_color == 'black') else KD_STEER
+                ki_use = 0.0 if (current_band_color == 'black') else KI_STEER
+                pid_out = (K_STEER * error) + (ki_use * self._pid_integral) + (kd_use * derivative)
 
                 # Quita el cálculo antiguo
                 # servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
                 if current_band_color == 'black':
-                    servo_base = int(STEER_CENTER + pid_out/3)
+                    servo_base = int(STEER_CENTER) # + pid_out * STEER_GAIN_BLACK)
                 elif current_band_color == 'yellow':
-                    servo_base = int(STEER_CENTER + pid_out * 2)
+                    servo_base = int((STEER_CENTER + YELLOW_CENTER_BIAS) + pid_out * 2)
                 else:
                     servo_base = int(STEER_CENTER + pid_out)
 
@@ -573,7 +592,8 @@ class Functions(threading.Thread):
                 servo_base = STEER_CENTER
 
             servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
-            servo_pos = self._steer_command(servo_cmd)
+            rate_use = STEER_SLEW_RATE_BLACK if (current_band_color == 'black') else STEER_SLEW_DEG_PER_SEC
+            servo_pos = self._steer_command(servo_cmd, slew_rate=rate_use)
 
         # 5) Velocidad
         # A) PARADA EN ROJO
@@ -582,12 +602,17 @@ class Functions(threading.Thread):
             self._set_target_speed(0)
             self._ramp_and_drive()
             time.sleep(RED_STOP_TIME)
+            self._set_target_speed(60)
+            self._ramp_and_drive()
             return
 
         if self.search_latch is not None:
             # --- MODO BÚSQUEDA ---
             if self.search_latch in ('search_forward_right', 'search_forward_left'):
-                self._set_target_speed(SEARCH_TURN_SPEED) # 40
+                if self.last_near_color == 'yellow':
+                    self._set_target_speed(SPEED_YELLOW_MAX)
+                else:
+                    self._set_target_speed(SEARCH_TURN_SPEED) # 40
                 self._ramp_and_drive()
             else:
                 try: # REVERSA FUERTE
@@ -599,13 +624,23 @@ class Functions(threading.Thread):
             # --- MODO NORMAL ---
             
             # Selección de velocidad MAX según color
+            # Selección de velocidad MAX: Prioridad a AMARILLO (frenar si se ve en CUALQUIER ventana)
+            is_yellow_any = False
+            is_white_any = False
+            if isinstance(color_list, list) and isinstance(hasl, list) and len(color_list) == len(hasl):
+                for i in range(len(color_list)):
+                    if hasl[i]:
+                        if color_list[i] == 'yellow': is_yellow_any = True
+                        if color_list[i] == 'white':  is_white_any = True
+            
             target_max = DRIVE_MAX_SPEED
-            if current_band_color == 'black':
-                target_max = SPEED_BLACK_BOOST # 60
-            elif current_band_color == 'yellow':
-                target_max = SPEED_YELLOW_MAX # 42
-            elif current_band_color == 'white':
-                target_max = SPEED_WHITE_NORMAL # 42
+            
+            if is_yellow_any:
+                target_max = SPEED_YELLOW_MAX # 45 - Prioridad absoluta: si veo amarillo, freno
+            elif is_white_any:
+                target_max = SPEED_WHITE_NORMAL # 50
+            elif current_band_color == 'black':
+                target_max = SPEED_BLACK_BOOST # 70 - Solo si NO hay amarillo/blanco y estoy en negro
 
             ref_err = float(en) if (hn and en) else (float(mix_err) if mix_err else 0.0)
             abs_ref = abs(ref_err)
@@ -613,7 +648,8 @@ class Functions(threading.Thread):
             if abs_ref >= ERR_STOP_THRESH_PX:
                 base = max(0, int(DRIVE_BASE_SPEED * 0.2))
             else:
-                k = max(0.0, min(1.0, abs_ref / float(ERR_SLOW_THRESH_PX)))
+                thresh_use = BLACK_SLOW_THRESH_PX if (current_band_color == 'black') else ERR_SLOW_THRESH_PX
+                k = max(0.0, min(1.0, abs_ref / float(thresh_use)))
                 base = int(DRIVE_BASE_SPEED + (target_max - DRIVE_BASE_SPEED) * (1.0 - k))
                 base = max(base, MIN_MOVE_SPEED)
 
