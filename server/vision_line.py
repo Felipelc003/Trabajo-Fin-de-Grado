@@ -11,31 +11,13 @@ import time
 # ==========================
 BLACK_PROFILE = {
     "hsv_lower": (0, 0, 0),
-    "hsv_upper": (179, 255, 100),
+    "hsv_upper": (179, 120, 255),
     "otsu_invert": True,
 }
-"""
-WHITE_PROFILE = {
-    "hsv_lower": (0, 0, 160),
-    "hsv_upper": (179, 70, 255),
-    "otsu_invert": False,
-}
 
-RED_PROFILE = {
-    "hsv_lower": (0, 193, 26),
-    "hsv_upper": (179, 255, 60),
-    "otsu_invert": False,
-}
-
-YELLOW_PROFILE = {
-    "hsv_lower": (20, 100, 50),
-    "hsv_upper": (50, 255, 110),
-    "otsu_invert": False, # Las líneas claras no invierten Otsu
-}
-"""
 WHITE_PROFILE = {
-    "hsv_lower": (80, 50, 170),
-    "hsv_upper": (105, 150, 0),
+    "hsv_lower": (0, 0, 140),
+    "hsv_upper": (179, 60, 255),
     "otsu_invert": False,
 }
 
@@ -57,11 +39,11 @@ YELLOW_PROFILE = {
 # ==========================
 # Parámetros por bandas
 # =========================
-Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.65), (0.65, 1.00)]
+Y_FRACS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.35), (0.35, 0.65), (0.65, 1.00)]
 N_BANDS = 5
-BAND_ENABLED = [False, False, True, True, True]
+BAND_ENABLED = [False, False, False, True, True]
 MIN_AREAS = [210, 240, 240, 300, 330]
-KERNEL_SIZES = [3, 3, 4, 5, 5]
+KERNEL_SIZES = [3, 3, 3, 3, 4]
 
 CORRIDOR_HALVES = [30, 35, 40, 45, 65]
 MAX_STEP_X = [30, 25, 22, 18, 9999]
@@ -143,14 +125,15 @@ def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False
 # ==========================
 # Helpers de máscaras
 # ==========================
+
 def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
     return _mask_from_profile(roi_hsv, roi_gray, WHITE_PROFILE, ksize=ksize)
 
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
         roi_hsv,
-        np.array((100, 130, 0), np.uint8),
-        np.array((120, 255, 200), np.uint8) # Un V-max de 120 es más seguro que 18
+        np.array((47, 152, 0), np.uint8),
+        np.array((179, 255, 51), np.uint8) # Un V-max de 120 es más seguro que >
     )
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
@@ -208,8 +191,8 @@ def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # Definimos el rango HSV estricto para amarillo
     # H: 20-40, S > 100, V > 80
-    lower = np.array([43, 27, 178])
-    upper = np.array([80, 170, 255])
+    lower = np.array([53, 44, 200])
+    upper = np.array([80, 110, 255])
     
     # Aplicamos la máscara HSV
     m_hsv = cv2.inRange(roi_hsv, lower, upper)

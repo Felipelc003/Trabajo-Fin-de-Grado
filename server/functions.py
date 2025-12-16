@@ -15,6 +15,7 @@ import numpy as np  # <-- NECESARIO para np.sign
 # Constantes de dirección/marcha
 # -----------------------------
 SERVO_TILT = 0
+SERVO_PAN  = 1
 SERVO_STEERING = 2
 
 # Dirección (ajusta a tu coche)
@@ -25,17 +26,29 @@ K_STEER            = 0.065  # deg/px (invierte a -0.08 si gira al revés)
 KD_STEER           = 0.15  # Ganancia Derivativa
 KI_STEER           = 0.01  # Ganancia Integral
 
+# --- CONFIGURACIÓN SERVO PAN (CÁMARA) ---
+PAN_CENTER         = 85     # Ángulo central (mirando al frente)
+PAN_MAX_LEFT       = 130    # Límite físico
+PAN_MAX_RIGHT      = 40
+
+# --- AJUSTES DE SUAVIZADO PAN ---
+PAN_GAIN           = 0.05   # Ganancia visual
+PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
+PAN_MAX_STEP       = 4.0    # Máx grados por ciclo
+PAN_DEADBAND       = 8      # Deadband visual para la cámara
+
 # Velocidades
 DRIVE_BASE_SPEED    = 60    # Velocidad base en curvas cerradas
 DRIVE_MAX_SPEED     = 65    # Velocidad en rectas (default)
 MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Velocidades por color
-SPEED_BLACK_BOOST   = 80    # Recta negra a tope (Braver)
+SPEED_BLACK_BOOST   = 70    # Recta negra a tope (Braver)
 SPEED_WHITE_NORMAL  = 50    # Normal
-SPEED_YELLOW_MAX    = 55    # Velocidad máxima amarilla
+SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
 YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
+RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
 
 # Maniobras (Curvas y Reversa)
 SEARCH_TURN_SPEED      = 40   # Más fuerza al girar buscando
@@ -43,7 +56,7 @@ SEARCH_REVERSE_SPEED   = 50   # Más fuerza marcha atrás
 
 # Ganancia de giro específica por color
 STEER_GAIN_BLACK       = 0.15 # Antes 1/3 (~0.33). Reducido a 0.15 para suavizar
-BLACK_DEADBAND_PX      = 20   # Ignorar errores menores en recta negra
+BLACK_DEADBAND_PX      = 40   # Ignorar errores menores en recta negra
 
 # Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
 BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
@@ -127,6 +140,10 @@ class Functions(threading.Thread):
         self._last_drive_time = 0.0
         self._line_last_seq = None
         self._last_debug_log = 0.0
+        self._ignore_red_until = 0.0 # Cooldown para no parar en bucle
+
+        self._pan_angle = float(PAN_CENTER)
+        self._pan_active = False
 
         # Evento para pausar/reanudar el bucle del hilo
         self.__flag = threading.Event()
@@ -149,7 +166,14 @@ class Functions(threading.Thread):
         self._pid_integral = 0.0
         self._pid_last_time = time.time()
 
+
         # Motores listos
+        try:
+            RPIservo.move(SERVO_PAN, int(self._pan_angle))
+            RPIservo.move(SERVO_TILT, 40)
+        except:
+            pass
+        
         try:
             if hasattr(move, "setup"):
                 move.setup()
@@ -157,6 +181,42 @@ class Functions(threading.Thread):
             print("[Functions] Aviso: move.setup() falló:", e)
 
     # --------------- Helpers de movimiento ---------------
+
+    def _update_pan_servo(self, error_px):
+        """
+        Mueve la cámara persiguiendo el error visual con FUERZA DE RETORNO SUAVE.
+        Devuelve el offset en grados desde el centro.
+        """
+        if error_px is None:
+            # Si no hay línea o no queremos seguirla, volver al centro lentamente
+            center_delta = (PAN_CENTER - self._pan_angle) * 0.1
+            self._pan_angle += center_delta
+        else:
+            # 1. Calcular fuerza visual
+            vision_delta = 0
+            if abs(float(error_px)) > PAN_DEADBAND:
+                # Error Positivo (Izq) -> Delta Positivo (Aumentar ángulo hacia Izq)
+                vision_delta = float(error_px) * PAN_GAIN 
+
+            # 2. Calcular fuerza de retorno (Elasticidad)
+            center_delta = (PAN_CENTER - self._pan_angle) * PAN_CENTER_FORCE
+            
+            # 3. Sumar fuerzas y limitar (Slew Rate)
+            total_delta = vision_delta + center_delta
+            if total_delta > PAN_MAX_STEP: total_delta = PAN_MAX_STEP
+            elif total_delta < -PAN_MAX_STEP: total_delta = -PAN_MAX_STEP
+
+            self._pan_angle += total_delta
+
+        # Clamp y aplicar
+        self._pan_angle = max(PAN_MAX_RIGHT, min(PAN_MAX_LEFT, self._pan_angle))
+        
+        try:
+            RPIservo.move(SERVO_PAN, int(self._pan_angle))
+        except:
+            pass
+
+        return (self._pan_angle - PAN_CENTER)
 
     def _motor_stop(self):
         try:
@@ -432,6 +492,10 @@ class Functions(threading.Thread):
 
         color_list = st.get('color_list', [None]*5) 
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
+        last_color = None
+        if current_band_color != last_color:
+            print("[", current_band_color, "]")
+            last_color = current_band_color
 
         any_band = isinstance(hasl, list) and any(hasl)
 
@@ -454,7 +518,9 @@ class Functions(threading.Thread):
             if cond_perdida:
                 # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
                 if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
-                    if self.last_near_side == 'left':
+                    if self.last_near_color == 'yellow' or self.last_near_color == 'white':
+                        self.search_latch = 'search_forward_right'
+                    elif self.last_near_side == 'left':
                         self.search_latch = 'search_forward_left'
                     else:
                         self.search_latch = 'search_forward_right'
@@ -478,16 +544,17 @@ class Functions(threading.Thread):
 
                 timeout_limit = SEARCH_FORWARD_TIMEOUT_S
                 if self.last_near_color == 'yellow':
-                    timeout_limit = 12.0 # 12s de búsqueda si era amarilla
+                    #timeout_limit = 12.0 # 12s de búsqueda si era amarilla
+                    pass
                 else:
                     timeout_limit = SEARCH_FORWARD_TIMEOUT_S
 
-                if (now - self.search_started_t) > timeout_limit:
-                    # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
-                    if self.search_latch == 'search_forward_left':
-                        self.search_latch = 'search_reverse_left'
-                    else:
-                        self.search_latch = 'search_reverse_right'
+                    if (now - self.search_started_t) > timeout_limit:
+                        # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
+                        if self.search_latch == 'search_forward_left':
+                            self.search_latch = 'search_reverse_left'
+                        else:
+                            self.search_latch = 'search_reverse_right'
                                 
                 # Si vemos la línea pero no está centrada, reseteamos debounce
                 if hn3:
@@ -547,7 +614,6 @@ class Functions(threading.Thread):
                 # --- LÓGICA PID ---
                 error = float(mix_err) # Error P
 
-                # Deadband específica para la recta negra
                 if current_band_color == 'black' and abs(error) < BLACK_DEADBAND_PX:
                     error = 0.0
 
@@ -566,17 +632,34 @@ class Functions(threading.Thread):
                 self._pid_last_time = now
 
                 # Cálculo final de dirección
-                kd_use = 0.0 if (current_band_color == 'black') else KD_STEER
-                ki_use = 0.0 if (current_band_color == 'black') else KI_STEER
+                kd_use = KD_STEER
+                ki_use = KI_STEER
                 pid_out = (K_STEER * error) + (ki_use * self._pid_integral) + (kd_use * derivative)
 
-                # Quita el cálculo antiguo
-                # servo_base = int(STEER_CENTER + K_STEER * int(mix_err))
-                if current_band_color == 'black':
-                    servo_base = int(STEER_CENTER) # + pid_out * STEER_GAIN_BLACK)
-                elif current_band_color == 'yellow':
-                    servo_base = int((STEER_CENTER + YELLOW_CENTER_BIAS) + pid_out * 2)
+                # --- LÓGICA DE MOVIMIENTO DE CÁMARA (ACTIVE GAZE) ---
+                pan_offset = 0
+                if current_band_color == 'yellow' or current_band_color == 'white':
+                     # Persigue la línea amarilla
+                     pan_offset = self._update_pan_servo(mix_err)
                 else:
+                     # Vuelve al centro para negro/otros
+                     self._update_pan_servo(None)
+                     pan_offset = 0
+
+                # --- CÁLCULO FINAL DE DIRECCIÓN ---
+                if current_band_color == 'black':
+                    servo_base = int(STEER_CENTER + pid_out)
+                    if servo_base >= 91.5:
+                        servo_base = 91.5
+                    elif servo_base <= 85.5:
+                        servo_base = 85.5
+                if current_band_color == 'yellow' or current_band_color == 'white':
+                    # Active Gaze: Dirección = Centro + OffsetCámara + PID
+                    # Copiamos el giro de la cámara + corrección fina
+                    servo_base = int(STEER_CENTER + pan_offset + pid_out)
+                    
+                else:
+                    # Lógica estándar
                     servo_base = int(STEER_CENTER + pid_out)
 
             # 4.c) PRE-GIRO escalonado por bandas (empieza con FAR)
@@ -597,13 +680,13 @@ class Functions(threading.Thread):
 
         # 5) Velocidad
         # A) PARADA EN ROJO
-        if current_band_color == 'red' and self.search_latch is None:
+        if current_band_color == 'red' and self.search_latch is None and (time.time() > self._ignore_red_until):
             print("[Func] ROJO DETECTADO: Parando...")
-            self._set_target_speed(0)
-            self._ramp_and_drive()
+            self._motor_stop()
             time.sleep(RED_STOP_TIME)
             self._set_target_speed(60)
             self._ramp_and_drive()
+            self._ignore_red_until = time.time() + RED_IGNORE_TIME
             return
 
         if self.search_latch is not None:
@@ -637,6 +720,9 @@ class Functions(threading.Thread):
             
             if is_yellow_any:
                 target_max = SPEED_YELLOW_MAX # 45 - Prioridad absoluta: si veo amarillo, freno
+                if self._current_speed > target_max:
+                    self._current_speed = float(target_max)
+
             elif is_white_any:
                 target_max = SPEED_WHITE_NORMAL # 50
             elif current_band_color == 'black':

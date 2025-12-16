@@ -279,7 +279,7 @@ async def recv_msg(websocket, path):
 
             # ---- Modo seguimiento de línea ----
             elif data == 'trackLine':
-                if RL: RL.front_color('white')
+                if RL: RL.front_color('yellow')
                 fuc.modeSet('trackLine')
                 camera_mode('trackline')
 
