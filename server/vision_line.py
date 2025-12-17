@@ -133,7 +133,7 @@ def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
         roi_hsv,
         np.array((47, 152, 0), np.uint8),
-        np.array((179, 255, 51), np.uint8) # Un V-max de 120 es más seguro que >
+        np.array((179, 255, 170), np.uint8) # Un V-max de 120 es más seguro que >
     )
     blur = cv2.GaussianBlur(roi_gray, (5, 5), 0)
     m_otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]

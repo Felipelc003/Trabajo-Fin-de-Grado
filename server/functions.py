@@ -79,7 +79,7 @@ RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.0, 0.0, 0.30, 0.50, 0.20]  # suma ≈ 1.0
+WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.40, 0.60]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -638,9 +638,10 @@ class Functions(threading.Thread):
 
                 # --- LÓGICA DE MOVIMIENTO DE CÁMARA (ACTIVE GAZE) ---
                 pan_offset = 0
-                if current_band_color == 'yellow' or current_band_color == 'white':
+                if current_band_color == 'yellow':
                      # Persigue la línea amarilla
                      pan_offset = self._update_pan_servo(mix_err)
+                     if pan_offset >= 75: pan_offset = 75
                 else:
                      # Vuelve al centro para negro/otros
                      self._update_pan_servo(None)
