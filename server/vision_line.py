@@ -16,10 +16,14 @@ BLACK_PROFILE = {
 }
 
 WHITE_PROFILE = {
-    "hsv_lower": (0, 0, 140),
-    "hsv_upper": (179, 60, 255),
+    "hsv_lower": (88, 20, 240),
+    "hsv_upper": (113, 255, 255),
     "otsu_invert": False,
 }
+"""
+    lower = np.array([53, 44, 200])
+    upper = np.array([80, 110, 255])
+"""
 
 # ROJO (Tus valores exactos)
 # Detecta cualquier tono (H 0-179) pero MUY OSCURO (V 40-75) y saturado
@@ -127,7 +131,17 @@ def _draw_row_box(overlay, i, y1, y2, cx, img_w, color, box_w=None, filled=False
 # ==========================
 
 def _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=3):
-    return _mask_from_profile(roi_hsv, roi_gray, WHITE_PROFILE, ksize=ksize)
+    # --- CAMBIO: Usar SOLO HSV puro, ignorando Otsu para evitar ruido ---
+    lower = np.array(WHITE_PROFILE["hsv_lower"], np.uint8)
+    upper = np.array(WHITE_PROFILE["hsv_upper"], np.uint8)
+    
+    m = cv2.inRange(roi_hsv, lower, upper)
+    
+    # Limpieza (Morphology)
+    ker = np.ones((ksize, ksize), np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, ker, iterations=1)
+    return m
 
 def _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=3):
     m_hsv = cv2.inRange(
@@ -191,7 +205,7 @@ def _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=3):
 def _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=3):
     # Definimos el rango HSV estricto para amarillo
     # H: 20-40, S > 100, V > 80
-    lower = np.array([53, 44, 200])
+    lower = np.array([45, 32, 165])
     upper = np.array([80, 110, 255])
     
     # Aplicamos la máscara HSV

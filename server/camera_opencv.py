@@ -49,7 +49,7 @@ class Camera(BaseCamera):
         self._p2.configure(cfg)
         self._p2.set_controls({"FrameRate": 60.0})
         self._p2.start()
-
+        """
         try:
             self._p2.set_controls({
                 "AeEnable": True,      # Desactivar Exposición Automática
@@ -58,7 +58,7 @@ class Camera(BaseCamera):
             })
         except Exception as e:
             print(f"[Camera] No se pudieron ajustar controles de exposición: {e}")
-
+        """
         # === CVProcessor (lazy) ===
         # Se construye en frames() para evitar ciclos de import y arrancar limpio
         self._cv = None

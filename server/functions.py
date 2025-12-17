@@ -518,7 +518,7 @@ class Functions(threading.Thread):
             if cond_perdida:
                 # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
                 if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
-                    if self.last_near_color == 'yellow' or self.last_near_color == 'white':
+                    if self.last_near_color == 'yellow':
                         self.search_latch = 'search_forward_right'
                     elif self.last_near_side == 'left':
                         self.search_latch = 'search_forward_left'
@@ -639,13 +639,16 @@ class Functions(threading.Thread):
                 # --- LÓGICA DE MOVIMIENTO DE CÁMARA (ACTIVE GAZE) ---
                 pan_offset = 0
                 if current_band_color == 'yellow':
-                     # Persigue la línea amarilla
-                     pan_offset = self._update_pan_servo(mix_err)
-                     if pan_offset >= 75: pan_offset = 75
+                    # Persigue la línea amarilla
+                    pan_offset = self._update_pan_servo(mix_err)
+                    if pan_offset >= 75: pan_offset = 75
+                elif current_band_color == 'white':
+                    # Persigue la línea blanca 
+                    pan_offset = self._update_pan_servo(mix_err)
                 else:
-                     # Vuelve al centro para negro/otros
-                     self._update_pan_servo(None)
-                     pan_offset = 0
+                    # Vuelve al centro para negro/otros
+                    self._update_pan_servo(None)
+                    pan_offset = 0
 
                 # --- CÁLCULO FINAL DE DIRECCIÓN ---
                 if current_band_color == 'black':
