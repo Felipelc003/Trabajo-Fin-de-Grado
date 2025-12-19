@@ -32,9 +32,9 @@ PAN_MAX_LEFT       = 130    # Límite físico
 PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO PAN ---
-PAN_GAIN           = 0.05   # Ganancia visual
+PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
 PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
-PAN_MAX_STEP       = 4.0    # Máx grados por ciclo
+PAN_MAX_STEP       = 6.0    # Máx grados por ciclo
 PAN_DEADBAND       = 8      # Deadband visual para la cámara
 
 # Velocidades
@@ -49,6 +49,12 @@ SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
 YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
 RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
+
+# Secuencias de colores
+WHITE_SEQUENCE = ["white", "black"]
+YELLOW_SEQUENCE = ["yellow", "black"]
+USE_YELLOW_SEQUENCE = True
+USE_WHITE_SEQUENCE = True
 
 # Maniobras (Curvas y Reversa)
 SEARCH_TURN_SPEED      = 40   # Más fuerza al girar buscando
@@ -79,7 +85,7 @@ RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.40, 0.60]  # suma ≈ 1.0
+WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -166,6 +172,11 @@ class Functions(threading.Thread):
         self._pid_integral = 0.0
         self._pid_last_time = time.time()
 
+        # Estado de secuencia de colores
+        self.white_sequence_index = 0  # Índice para secuencia blanca
+        self.yellow_sequence_index = 0  # Índice para secuencia amarilla
+        self.target_color = None  # Se establece al detectar el primer color
+        self.active_sequence = None  # 'white' o 'yellow', indica cuál secuencia está activa
 
         # Motores listos
         try:
@@ -439,6 +450,12 @@ class Functions(threading.Thread):
         self.search_latch = None
         self.search_debounce = 0
         self._err_ema = None
+        
+        # Reset secuencia de colores
+        self.white_sequence_index = 0
+        self.yellow_sequence_index = 0
+        self.target_color = None
+        self.active_sequence = None
 
         self.functionMode = 'trackLine'
         self.resume()
@@ -490,12 +507,53 @@ class Functions(threading.Thread):
         hf   = st.get('has_far',  ef is not None)
 
 
+
         color_list = st.get('color_list', [None]*5) 
+        
+        # --- Detectar color RAW (sin filtrar) de la banda más cercana ---
+        raw_band_color = color_list[4] if (hasl and hasl[4]) else None
+        
+        # --- PASO 1: Activar secuencia solo UNA VEZ al inicio ---
+        # Esto se ejecuta SOLO la primera vez que ve blanco o amarillo
+        if self.active_sequence is None and raw_band_color in ['white', 'yellow']:
+            if raw_band_color == 'white' and USE_WHITE_SEQUENCE:
+                self.active_sequence = 'white'
+                self.target_color = WHITE_SEQUENCE[0]
+                print(f"[Secuencia] Iniciando secuencia BLANCA: {WHITE_SEQUENCE}")
+                print(f"[Secuencia] Ignoraré AMARILLO mientras siga BLANCO")
+            elif raw_band_color == 'yellow' and USE_YELLOW_SEQUENCE:
+                self.active_sequence = 'yellow'
+                self.target_color = YELLOW_SEQUENCE[0]
+                print(f"[Secuencia] Iniciando secuencia AMARILLA: {YELLOW_SEQUENCE}")
+                print(f"[Secuencia] Ignoraré BLANCO mientras siga AMARILLO")
+        
+        # --- PASO 2: Aplicar filtro de colores competidores ---
+        if self.target_color is not None and (USE_WHITE_SEQUENCE or USE_YELLOW_SEQUENCE):
+            filtered_hasl = list(hasl) if hasl else [False]*5
+            for i in range(len(filtered_hasl)):
+                if filtered_hasl[i]:
+                    band_color = color_list[i]
+                    # Si estoy siguiendo BLANCO, ignorar solo AMARILLO
+                    if self.active_sequence == 'white' and self.target_color == 'white':
+                        if band_color == 'yellow':
+                            filtered_hasl[i] = False  # Ignorar amarillo
+                            if i == 4:  # Solo log para banda más cercana
+                                print(f"[Filtro] Ignorando AMARILLO (sigo BLANCO)")
+                    # Si estoy siguiendo AMARILLO, ignorar solo BLANCO
+                    elif self.active_sequence == 'yellow' and self.target_color == 'yellow':
+                        if band_color == 'white':
+                            filtered_hasl[i] = False  # Ignorar blanco
+                            if i == 4:  # Solo log para banda más cercana
+                                print(f"[Filtro] Ignorando BLANCO (sigo AMARILLO)")
+            hasl = filtered_hasl
+        
+        # --- PASO 3: Calcular current_band_color DESPUÉS del filtro ---
+        # Esto determina el color que realmente está siguiendo
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
-        last_color = None
-        if current_band_color != last_color:
-            print("[", current_band_color, "]")
-            last_color = current_band_color
+        
+        # Debug: mostrar color actual
+        if current_band_color is not None:
+            print(f"[Color actual] {current_band_color}")
 
         any_band = isinstance(hasl, list) and any(hasl)
 
@@ -555,6 +613,21 @@ class Functions(threading.Thread):
                             self.search_latch = 'search_reverse_left'
                         else:
                             self.search_latch = 'search_reverse_right'
+                        
+                        # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
+                        # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
+                        if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
+                            if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
+                                self.white_sequence_index += 1
+                                self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
+                                print(f"[Secuencia BLANCA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
+                        elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
+                            if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
+                                self.yellow_sequence_index += 1
+                                self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
+                                print(f"[Secuencia AMARILLA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
                                 
                 # Si vemos la línea pero no está centrada, reseteamos debounce
                 if hn3:
