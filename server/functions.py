@@ -33,8 +33,9 @@ PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO PAN ---
 PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
+PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
 PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
-PAN_MAX_STEP       = 4.0    # Máx grados por ciclo
+PAN_MAX_STEP       = 6.0    # Máx grados por ciclo
 PAN_DEADBAND       = 8      # Deadband visual para la cámara
 
 # Velocidades
@@ -49,6 +50,12 @@ SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
 YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
 RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
+
+# Secuencias de colores
+WHITE_SEQUENCE = ["white", "black"]
+YELLOW_SEQUENCE = ["yellow", "black"]
+USE_YELLOW_SEQUENCE = True
+USE_WHITE_SEQUENCE = True
 
 # Secuencias de colores
 WHITE_SEQUENCE = ["white", "black"]
@@ -85,6 +92,7 @@ RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
+WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
 WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
@@ -516,6 +524,7 @@ class Functions(threading.Thread):
 
 
 
+
         color_list = st.get('color_list', [None]*5)
         
         # --- Detectar color RAW (sin filtrar) de la banda más cercana ---
@@ -587,6 +596,10 @@ class Functions(threading.Thread):
         # Debug: mostrar color actual
         if current_band_color is not None:
             print(f"[Color actual] {current_band_color}")
+        
+        # Debug: mostrar color actual
+        if current_band_color is not None:
+            print(f"[Color actual] {current_band_color}")
 
         any_band = isinstance(hasl, list) and any(hasl)
 
@@ -646,6 +659,21 @@ class Functions(threading.Thread):
                             self.search_latch = 'search_reverse_left'
                         else:
                             self.search_latch = 'search_reverse_right'
+                        
+                        # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
+                        # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
+                        if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
+                            if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
+                                self.white_sequence_index += 1
+                                self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
+                                print(f"[Secuencia BLANCA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
+                        elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
+                            if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
+                                self.yellow_sequence_index += 1
+                                self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
+                                print(f"[Secuencia AMARILLA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
                         
                         # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
                         # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
