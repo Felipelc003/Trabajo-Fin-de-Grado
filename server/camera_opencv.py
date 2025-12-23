@@ -1,7 +1,6 @@
 import time
 import threading
 import cv2
-import numpy as np
 from picamera2 import Picamera2
 
 from base_camera import BaseCamera
@@ -94,7 +93,7 @@ class Camera(BaseCamera):
 
     # ---------- API nueva de modo lineBlack ----------
     def enable_line_black(self, enable: bool = True):
-        self.modeSelect = "lineBlack" if enable else "none"
+        self.modeSelect = "trackLine" if enable else "none"
         if self._cv is not None:
             self._cv.mode = self.modeSelect
 
@@ -114,9 +113,9 @@ class Camera(BaseCamera):
         print(f"[Camera] modeselect -> {mode}")
         self.modeSelect = mode
         
-        if self.modeSelect == 'lineBlack':
+        if self.modeSelect == 'trackLine':
         
-            self.cv_thread.mode = 'lineBlack'
+            self.cv_thread.mode = 'trackLine'
             self.cv_thread.img_to_process = None
         
         elif self.modeSelect == 'none':

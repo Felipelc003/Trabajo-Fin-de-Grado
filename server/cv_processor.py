@@ -8,18 +8,32 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from pyzbar import pyzbar
 
 class CVProcessor:
     def __init__(self):
         self.mode: str = "none"
         self.draw_overlays: bool = True
+        self.frame = None  # Frame actual para lectura QR
+        self._paused = False
 
         self._line_state = {
             "has_line": False, "err": 0, "cx": None,
             "img_w": 0, "img_h": 0, "timestamp": 0.0,
+            # Datos QR
+            "qr_data": None,        # String del QR leído (ej: "Y-A-2")
+            "qr_color": None,       # 'yellow' o 'white'
+            "qr_mode": None,        # 'A' o 'U'
+            "qr_cycles": None,      # número entero
+            "qr_valid": False,      # True si se leyó un QR válido
+            "qr_timestamp": 0.0,    # Cuándo se leyó el QR
         }
         self._line_lock = threading.Lock()
         self._line_seq = 0
+        
+        # Estado de scaneo QR
+        self._qr_scanning = False
+        self._qr_scan_thread = None
 
         # Multiproceso (fork en RPi para evitar re-imports de GPIO)
         start_method = "fork" if "fork" in mp.get_all_start_methods() else "spawn"
@@ -71,11 +85,122 @@ class CVProcessor:
     def get_vehicle_status(self):
         with self._status_lock:
             return dict(self._vehicle_status)
+    
+    # ----- QR Scanning -----
+    def start_qr_scan(self):
+        """Inicia el escaneo de QR en un thread separado"""
+        if self._qr_scanning:
+            print("[CVProcessor] QR scan ya está activo")
+            return
+        
+        self._qr_scanning = True
+        self._qr_scan_thread = threading.Thread(target=self._qr_scan_worker, daemon=True)
+        self._qr_scan_thread.start()
+        print("[CVProcessor] Iniciando escaneo QR...")
+    
+    def stop_qr_scan(self):
+        """Detiene el escaneo de QR"""
+        self._qr_scanning = False
+        print("[CVProcessor] Deteniendo escaneo QR...")
+    
+    def pause(self):
+        """Pausa el procesamiento de bandas temporalmente"""
+        self._paused = True
+        print("[CVProcessor] Procesamiento de bandas PAUSADO")
+    def resume(self):
+        """Reanuda el procesamiento de bandas"""
+        self._paused = False
+        print("[CVProcessor] Procesamiento de bandas REANUDADO")
+
+    def _qr_scan_worker(self):
+        """Thread worker que escanea QR codes continuamente"""
+        print("[CVProcessor QR] Worker iniciado")
+        
+        while self._qr_scanning:
+            try:
+                # Usar el frame actual
+                if self.frame is None:
+                    time.sleep(0.1)
+                    continue
+                
+                frame = self.frame.copy()
+                
+                # Convertir a escala de grises
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Detectar códigos QR
+                decoded_objects = pyzbar.decode(gray)
+                
+                if decoded_objects:
+                    for obj in decoded_objects:
+                        # Decodificar el texto del QR
+                        qr_data = obj.data.decode('utf-8').strip().upper()
+                        print(f"[CVProcessor QR] Código detectado: {qr_data}")
+                        
+                        # Parsear formato C-M-N
+                        parts = qr_data.split('-')
+                        if len(parts) == 3:
+                            color_code, mode_code, cycles_str = parts
+                            
+                            # Validar color
+                            if color_code == 'Y':
+                                color = 'yellow'
+                            elif color_code == 'W':
+                                color = 'white'
+                            else:
+                                print(f"[CVProcessor QR] Color inválido: {color_code}")
+                                continue
+                            
+                            # Validar modo
+                            if mode_code not in ['A', 'U']:
+                                print(f"[CVProcessor QR] Modo inválido: {mode_code}")
+                                continue
+                            
+                            # Validar ciclos
+                            try:
+                                cycles = int(cycles_str)
+                                if cycles <= 0:
+                                    print(f"[CVProcessor QR] Ciclos inválido: {cycles}")
+                                    continue
+                            except ValueError:
+                                print(f"[CVProcessor QR] Ciclos no numérico: {cycles_str}")
+                                continue
+                            
+                            # QR válido encontrado - publicar en line_state
+                            print(f"[CVProcessor QR] ✓ QR válido: Color={color}, Modo={mode_code}, Ciclos={cycles}")
+                            
+                            with self._line_lock:
+                                self._line_state['qr_data'] = qr_data
+                                self._line_state['qr_color'] = color
+                                self._line_state['qr_mode'] = mode_code
+                                self._line_state['qr_cycles'] = cycles
+                                self._line_state['qr_valid'] = True
+                                self._line_state['qr_timestamp'] = time.time()
+                                self._line_seq += 1
+                            
+                            # Detener escaneo después de leer un QR válido
+                            self._qr_scanning = False
+                            print("[CVProcessor QR] QR válido leído - deteniendo escaneo")
+                            return
+                        else:
+                            print(f"[CVProcessor QR] Formato inválido: {qr_data}")
+                
+                # Pequeña pausa
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"[CVProcessor QR] Error: {e}")
+                time.sleep(0.1)
+        
+        print("[CVProcessor QR] Worker finalizado")
 
 
     # ----- llamado desde la cámara para pegar overlay y alimentar worker -----
     def draw_elements_on_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
-        if self.mode == "lineBlack":
+        # Guardar frame actual para lectura QR
+        self.frame = frame_bgr
+        
+        if self.mode == "trackLine" and not self._paused:
             self._frame_i += 1
             if (self._frame_i % self._every) == 0:
                 try:

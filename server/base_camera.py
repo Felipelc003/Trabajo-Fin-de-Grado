@@ -1,6 +1,6 @@
 import time
 import threading
-import cv2
+
 try:
     from greenlet import getcurrent as get_ident
 except ImportError:

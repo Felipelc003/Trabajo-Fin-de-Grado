@@ -32,7 +32,7 @@ PAN_MAX_LEFT       = 130    # Límite físico
 PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO PAN ---
-PAN_GAIN           = 0.05   # Ganancia visual
+PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
 PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
 PAN_MAX_STEP       = 4.0    # Máx grados por ciclo
 PAN_DEADBAND       = 8      # Deadband visual para la cámara
@@ -49,6 +49,12 @@ SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
 YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
 RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
+
+# Secuencias de colores
+WHITE_SEQUENCE = ["white", "black"]
+YELLOW_SEQUENCE = ["yellow", "black"]
+USE_YELLOW_SEQUENCE = True
+USE_WHITE_SEQUENCE = True
 
 # Maniobras (Curvas y Reversa)
 SEARCH_TURN_SPEED      = 40   # Más fuerza al girar buscando
@@ -79,7 +85,7 @@ RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.40, 0.60]  # suma ≈ 1.0
+WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
 PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
@@ -122,7 +128,7 @@ USE_TANH_SHAPING  = True   # activa compresión no lineal del error
 
 class Functions(threading.Thread):
     """
-    Hilo de CONTROL: consume el estado de línea publicado por camera_opencv (modo 'lineBlack')
+    Hilo de CONTROL: consume el estado de línea publicado por camera_opencv (modo 'trackLine')
     y gobierna servo de dirección + motores con rampa.
     """
 
@@ -166,6 +172,19 @@ class Functions(threading.Thread):
         self._pid_integral = 0.0
         self._pid_last_time = time.time()
 
+        # Estado de secuencia de colores (LEGACY - mantenido por compatibilidad)
+        self.white_sequence_index = 0  # Índice para secuencia blanca
+        self.yellow_sequence_index = 0  # Índice para secuencia amarilla
+        self.target_color = None  # Se establece al detectar el primer color
+        self.active_sequence = None  # 'white' o 'yellow', indica cuál secuencia está activa
+        
+        # Estado QR - Sistema nuevo de lectura de códigos QR
+        self.qr_initial_color = None    # 'yellow' o 'white' del QR
+        self.qr_mode = None              # 'A' (alternado) o 'U' (único)
+        self.qr_cycles_total = 0         # N del QR
+        self.qr_cycles_done = 0          # Contador de pasos completados
+        self.qr_current_color = None     # Color actual a seguir
+        self.qr_needs_read = True        # Flag para saber si necesita leer QR
 
         # Motores listos
         try:
@@ -401,7 +420,7 @@ class Functions(threading.Thread):
     def trackLine(self):
         """
         Seguir línea con cámara:
-        - La cámara publica métricas (5 ventanas) en cv_thread.line_state (modo 'lineBlack').
+        - La cámara publica métricas (5 ventanas) en cv_thread.line_state (modo 'trackLine').
         - Este hilo controla servo + motores en base a dichas métricas.
         """
         # Seguridad básica
@@ -420,10 +439,10 @@ class Functions(threading.Thread):
         # Activar visión
         try:
             cam = Camera.get_instance()
-            cam.modeselect('lineBlack')
-            print("[trackLine] Cámara en 'lineBlack'. Control en functions.py")
+            cam.modeselect('trackLine')
+            print("[trackLine] Cámara en 'trackLine'. Control en functions.py")
         except Exception as e:
-            print(f"[trackLine] No se pudo activar lineBlack: {e}")
+            print(f"[trackLine] No se pudo activar trackLine: {e}")
 
         # Estado de control
         self._target_speed = 0
@@ -439,6 +458,12 @@ class Functions(threading.Thread):
         self.search_latch = None
         self.search_debounce = 0
         self._err_ema = None
+        
+        # Reset secuencia de colores
+        self.white_sequence_index = 0
+        self.yellow_sequence_index = 0
+        self.target_color = None
+        self.active_sequence = None
 
         self.functionMode = 'trackLine'
         self.resume()
@@ -490,12 +515,78 @@ class Functions(threading.Thread):
         hf   = st.get('has_far',  ef is not None)
 
 
-        color_list = st.get('color_list', [None]*5) 
+
+        color_list = st.get('color_list', [None]*5)
+        
+        # --- Detectar color RAW (sin filtrar) de la banda más cercana ---
+        raw_band_color = color_list[4] if (hasl and hasl[4]) else None
+        
+        # ═══════════════════════════════════════════════════════════
+        # SISTEMA QR: Filtrado de colores competidores
+        # ═══════════════════════════════════════════════════════════
+        if self.qr_current_color is not None and not self.qr_needs_read:
+            # Sistema QR activo - filtrar colores según instrucción QR
+            filtered_hasl = list(hasl) if hasl else [False]*5
+            for i in range(len(filtered_hasl)):
+                if filtered_hasl[i]:
+                    band_color = color_list[i]
+                    
+                    # Si QR dice seguir AMARILLO, ignorar BLANCO
+                    if self.qr_current_color == 'yellow':
+                        if band_color == 'white':
+                            filtered_hasl[i] = False
+                            if i == 4:  # Log solo para banda más cercana
+                                print(f"[QR Filtro] Ignorando BLANCO (sigo AMARILLO)")
+                    
+                    # Si QR dice seguir BLANCO, ignorar AMARILLO
+                    elif self.qr_current_color == 'white':
+                        if band_color == 'yellow':
+                            filtered_hasl[i] = False
+                            if i == 4:  # Log solo para banda más cercana
+                                print(f"[QR Filtro] Ignorando AMARILLO (sigo BLANCO)")
+            
+            hasl = filtered_hasl
+        
+        # ═══════════════════════════════════════════════════════════
+        # SISTEMA LEGACY: Filtrado de colores (mantenido por compatibilidad)
+        # ═══════════════════════════════════════════════════════════
+        elif self.target_color is not None and (USE_WHITE_SEQUENCE or USE_YELLOW_SEQUENCE):
+            # Sistema legacy activo (solo si QR no está activo)
+            # --- PASO 1: Activar secuencia solo UNA VEZ al inicio ---
+            if self.active_sequence is None and raw_band_color in ['white', 'yellow']:
+                if raw_band_color == 'white' and USE_WHITE_SEQUENCE:
+                    self.active_sequence = 'white'
+                    self.target_color = WHITE_SEQUENCE[0]
+                    print(f"[Secuencia Legacy] Iniciando secuencia BLANCA: {WHITE_SEQUENCE}")
+                elif raw_band_color == 'yellow' and USE_YELLOW_SEQUENCE:
+                    self.active_sequence = 'yellow'
+                    self.target_color = YELLOW_SEQUENCE[0]
+                    print(f"[Secuencia Legacy] Iniciando secuencia AMARILLA: {YELLOW_SEQUENCE}")
+            
+            # --- PASO 2: Aplicar filtro de colores competidores ---
+            filtered_hasl = list(hasl) if hasl else [False]*5
+            for i in range(len(filtered_hasl)):
+                if filtered_hasl[i]:
+                    band_color = color_list[i]
+                    if self.active_sequence == 'white' and self.target_color == 'white':
+                        if band_color == 'yellow':
+                            filtered_hasl[i] = False
+                            if i == 4:
+                                print(f"[Filtro Legacy] Ignorando AMARILLO (sigo BLANCO)")
+                    elif self.active_sequence == 'yellow' and self.target_color == 'yellow':
+                        if band_color == 'white':
+                            filtered_hasl[i] = False
+                            if i == 4:
+                                print(f"[Filtro Legacy] Ignorando BLANCO (sigo AMARILLO)")
+            hasl = filtered_hasl
+        
+        # --- Calcular current_band_color DESPUÉS del filtro ---
+        # Esto determina el color que realmente está siguiendo
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
-        last_color = None
-        if current_band_color != last_color:
-            print("[", current_band_color, "]")
-            last_color = current_band_color
+        
+        # Debug: mostrar color actual
+        if current_band_color is not None:
+            print(f"[Color actual] {current_band_color}")
 
         any_band = isinstance(hasl, list) and any(hasl)
 
@@ -555,6 +646,21 @@ class Functions(threading.Thread):
                             self.search_latch = 'search_reverse_left'
                         else:
                             self.search_latch = 'search_reverse_right'
+                        
+                        # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
+                        # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
+                        if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
+                            if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
+                                self.white_sequence_index += 1
+                                self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
+                                print(f"[Secuencia BLANCA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
+                        elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
+                            if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
+                                self.yellow_sequence_index += 1
+                                self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
+                                print(f"[Secuencia AMARILLA] Cambiando a color: {self.target_color}")
+                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
                                 
                 # Si vemos la línea pero no está centrada, reseteamos debounce
                 if hn3:
@@ -683,15 +789,156 @@ class Functions(threading.Thread):
             servo_pos = self._steer_command(servo_cmd, slew_rate=rate_use)
 
         # 5) Velocidad
-        # A) PARADA EN ROJO
+        # A) PARADA EN ROJO CON SISTEMA QR
         if current_band_color == 'red' and self.search_latch is None and (time.time() > self._ignore_red_until):
-            print("[Func] ROJO DETECTADO: Parando...")
-            self._motor_stop()
-            time.sleep(RED_STOP_TIME)
-            self._set_target_speed(60)
-            self._ramp_and_drive()
-            self._ignore_red_until = time.time() + RED_IGNORE_TIME
-            return
+            
+            # CASO 1: Necesita leer QR (no hay orden activa)
+            if self.qr_needs_read:
+                print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
+                self._motor_stop()
+                
+            # PAUSAR procesamiento de bandas
+            try:
+                cam = Camera.get_instance()
+                cvp = cam.cv_thread
+                cvp.pause()  # ← PAUSAR BANDAS
+            except Exception as e:
+                print(f"[QR] Error pausando bandas: {e}")
+            # Mover cámara a posición de escaneo
+            try:
+                RPIservo.move(SERVO_TILT, 90)
+                RPIservo.move(SERVO_PAN, 85)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"[QR] Error moviendo servos: {e}")
+            # Iniciar escaneo QR
+            try:
+                cvp.start_qr_scan()
+            except Exception as e:
+                print(f"[QR] Error iniciando QR scan: {e}")
+
+
+                # Esperar a que se lea el QR
+                print("[QR] Esperando lectura de QR...")
+                qr_timeout = 60.0  # Timeout de 60 segundos
+                qr_start_time = time.time()
+                qr_found = False
+                
+                while (time.time() - qr_start_time) < qr_timeout:
+                    try:
+                        st, seq = cvp.get_line_state(wait_new=False)
+                        if st.get('qr_valid', False):
+                            # QR válido leído
+                            color = st.get('qr_color')
+                            mode = st.get('qr_mode')
+                            cycles = st.get('qr_cycles')
+                            qr_found = True
+                            print(f"[QR] ✓ QR recibido de CVProcessor: {color}, {mode}, {cycles}")
+                            break
+                    except Exception as e:
+                        print(f"[QR] Error leyendo line_state: {e}")
+                    
+                    time.sleep(0.1)
+                
+                if not qr_found:
+                    print("[QR] ⚠ Timeout esperando QR - usando valores por defecto")
+                    color, mode, cycles = 'yellow', 'U', 1
+                
+                # Detener escaneo
+                try:
+                    cvp.stop_qr_scan()
+                except:
+                    pass
+                
+                # Inicializar estado QR
+                self.qr_initial_color = color
+                self.qr_mode = mode
+                self.qr_cycles_total = cycles
+                self.qr_cycles_done = 0
+                self.qr_current_color = color
+                self.qr_needs_read = False
+                
+                print(f"[QR] ══════ ORDEN RECIBIDA ══════")
+                print(f"[QR] Color inicial: {color}")
+                print(f"[QR] Modo: {'ALTERNADO' if mode == 'A' else 'ÚNICO'}")
+                print(f"[QR] Ciclos: {cycles}")
+                print(f"[QR] ════════════════════════════")
+                
+                try:
+                    cvp.resume()  # ← REANUDAR BANDAS
+                except Exception as e:
+                    print(f"[QR] Error reanudando bandas: {e}")
+
+
+                # Restaurar cámara a posición normal
+                try:
+                    RPIservo.move(SERVO_TILT, 40)
+                    RPIservo.move(SERVO_PAN, 85)
+                except:
+                    pass
+                
+                # Limpiar el QR válido del estado
+                try:
+                    with cvp._line_lock:
+                        cvp._line_state['qr_valid'] = False
+                except:
+                    pass
+                
+                # Esperar antes de continuar
+                time.sleep(RED_STOP_TIME)
+                
+                # Continuar con velocidad normal
+                self._set_target_speed(60)
+                self._ramp_and_drive()
+                self._ignore_red_until = time.time() + RED_IGNORE_TIME
+                print(f"[QR] Continuando por línea {self.qr_current_color.upper()}")
+                return
+            
+            # CASO 2: Ejecutando orden activa (pasa sin parar)
+            else:
+                print(f"[QR] ROJO detectado - Ciclo {self.qr_cycles_done + 1}")
+                
+                # Incrementar contador
+                self.qr_cycles_done += 1
+                
+                # Modo Único (U)
+                if self.qr_mode == 'U':
+                    if self.qr_cycles_done >= self.qr_cycles_total:
+                        # Orden completada
+                        self.qr_needs_read = True
+                        print(f"[QR] ✓ Orden ÚNICA completada ({self.qr_cycles_total} ciclos)")
+                        print(f"[QR] Próximo rojo leerá nuevo QR")
+                    else:
+                        # Continuar con el mismo color
+                        print(f"[QR] Modo ÚNICO: Continúa con {self.qr_current_color.upper()}")
+                        print(f"[QR] Progreso: {self.qr_cycles_done}/{self.qr_cycles_total}")
+                
+                # Modo Alternado (A)
+                elif self.qr_mode == 'A':
+                    total_stops = self.qr_cycles_total * 2  # Cada ciclo tiene 2 paradas
+                    
+                    if self.qr_cycles_done >= total_stops:
+                        # Orden completada
+                        self.qr_needs_read = True
+                        print(f"[QR] ✓ Orden ALTERNADA completada ({self.qr_cycles_total} ciclos = {total_stops} paradas)")
+                        print(f"[QR] Próximo rojo leerá nuevo QR")
+                    else:
+                        # Alternar color
+                        if self.qr_current_color == 'yellow':
+                            self.qr_current_color = 'white'
+                        else:
+                            self.qr_current_color = 'yellow'
+                        
+                        print(f"[QR] Modo ALTERNADO: Cambia a {self.qr_current_color.upper()}")
+                        print(f"[QR] Progreso: {self.qr_cycles_done}/{total_stops} paradas")
+                
+                # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
+                self._ignore_red_until = time.time() + RED_IGNORE_TIME
+                
+                # NO PARAR - continuar inmediatamente
+                print(f"[QR] Pasando por rojo sin detenerse...")
+                return
+
 
         if self.search_latch is not None:
             # --- MODO BÚSQUEDA ---

@@ -52,7 +52,7 @@ def camera_mode(mode: str):
         cam = Camera.get_instance()
         # nueva API
         if hasattr(cam, "enable_line_black"):
-            if mode in ("lineBlack", "trackLine", "automatic"):
+            if mode in ("trackLine"):
                 cam.enable_line_black(True)
             elif mode in ("none", "pause", "stop"):
                 cam.enable_line_black(False)
@@ -282,15 +282,6 @@ async def recv_msg(websocket, path):
                 if RL: RL.front_color('yellow')
                 fuc.modeSet('trackLine')
                 camera_mode('trackline')
-
-            # ---- Modo automático (evitación obst.) ----
-            elif data == 'automatic':   # o 'command' según tu variable
-                print("[WS] Botón 'automatic' → activar trackLine (lineBlack).")
-                try:
-                    fuc.modeSet('trackLine')   # usa tu mismo mecanismo de funciones
-                except Exception as e:
-                    print(f"[WS] No pude lanzar trackLine via fuc.modeSet: {e}")
-                camera_mode('lineBlack')
 
             elif data == 'pauseFunctions':
                 if RL: RL.front_color('black')
