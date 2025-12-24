@@ -584,18 +584,17 @@ class Functions(threading.Thread):
                                 print(f"[Filtro Legacy] Ignorando AMARILLO (sigo BLANCO)")
                     elif self.active_sequence == 'yellow' and self.target_color == 'yellow':
                         if band_color == 'white':
+                            RPIservo.move(SERVO_PAN, PAN_MAX_RIGHT)
                             filtered_hasl[i] = False
                             if i == 4:
                                 print(f"[Filtro Legacy] Ignorando BLANCO (sigo AMARILLO)")
+                                RPIservo.move(SERVO_PAN, PAN_MAX_RIGHT)
+
             hasl = filtered_hasl
         
         # --- Calcular current_band_color DESPUÉS del filtro ---
         # Esto determina el color que realmente está siguiendo
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
-        
-        # Debug: mostrar color actual
-        if current_band_color is not None:
-            print(f"[Color actual] {current_band_color}")
         
         # Debug: mostrar color actual
         if current_band_color is not None:
@@ -824,27 +823,30 @@ class Functions(threading.Thread):
             if self.qr_needs_read:
                 print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
                 self._motor_stop()
-                
-            # PAUSAR procesamiento de bandas
-            try:
-                cam = Camera.get_instance()
-                cvp = cam.cv_thread
-                cvp.pause()  # ← PAUSAR BANDAS
-            except Exception as e:
-                print(f"[QR] Error pausando bandas: {e}")
-            # Mover cámara a posición de escaneo
-            try:
-                RPIservo.move(SERVO_TILT, 90)
-                RPIservo.move(SERVO_PAN, 85)
-                time.sleep(0.5)
-            except Exception as e:
-                print(f"[QR] Error moviendo servos: {e}")
-            # Iniciar escaneo QR
-            try:
-                cvp.start_qr_scan()
-            except Exception as e:
-                print(f"[QR] Error iniciando QR scan: {e}")
 
+                print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
+                self._motor_stop()
+                
+                # PAUSAR procesamiento de bandas
+                try:
+                    cam = Camera.get_instance()
+                    cvp = cam.cv_thread
+                    cvp.pause()  # ← PAUSAR BANDAS
+                except Exception as e:
+                    print(f"[QR] Error pausando bandas: {e}")
+                    
+                # Mover cámara a posición de escaneo
+                try:
+                    RPIservo.move(SERVO_TILT, 90)
+                    RPIservo.move(SERVO_PAN, 85)
+                except Exception as e:
+                    print(f"[QR] Error moviendo servos: {e}")
+                    
+                # Iniciar escaneo QR
+                try:
+                    cvp.start_qr_scan()
+                except Exception as e:
+                    print(f"[QR] Error iniciando QR scan: {e}")
 
                 # Esperar a que se lea el QR
                 print("[QR] Esperando lectura de QR...")
@@ -868,10 +870,10 @@ class Functions(threading.Thread):
                     
                     time.sleep(0.1)
                 
-                if not qr_found:
-                    print("[QR] ⚠ Timeout esperando QR - usando valores por defecto")
-                    color, mode, cycles = 'yellow', 'U', 1
                 
+                if not qr_found:
+                    print("[Functions] No se ha detectado nigún QR")
+            
                 # Detener escaneo
                 try:
                     cvp.stop_qr_scan()
@@ -892,18 +894,21 @@ class Functions(threading.Thread):
                 print(f"[QR] Ciclos: {cycles}")
                 print(f"[QR] ════════════════════════════")
                 
+                # REANUDAR procesamiento de bandas
                 try:
-                    cvp.resume()  # ← REANUDAR BANDAS
+                    cvp.resume()
+                    print("[QR] Bandas reanudadas")
                 except Exception as e:
                     print(f"[QR] Error reanudando bandas: {e}")
-
 
                 # Restaurar cámara a posición normal
                 try:
                     RPIservo.move(SERVO_TILT, 40)
                     RPIservo.move(SERVO_PAN, 85)
-                except:
-                    pass
+                    RPIservo.move(SERVO_STEERING, 88.5)
+                    print("[QR] Cámara restaurada a posición normal")
+                except Exception as e:
+                    print(f"[QR] Error restaurando cámara: {e}")
                 
                 # Limpiar el QR válido del estado
                 try:
@@ -921,7 +926,7 @@ class Functions(threading.Thread):
                 self._ignore_red_until = time.time() + RED_IGNORE_TIME
                 print(f"[QR] Continuando por línea {self.qr_current_color.upper()}")
                 return
-            
+                
             # CASO 2: Ejecutando orden activa (pasa sin parar)
             else:
                 print(f"[QR] ROJO detectado - Ciclo {self.qr_cycles_done + 1}")
@@ -1056,8 +1061,7 @@ class Functions(threading.Thread):
             # --- MODO PARADA (Sin línea Y sin búsqueda) ---
             self._no_line_frames += 1
             if self._no_line_frames >= NO_LINE_STOP_FRAMES:
-                RPIservo.move(SERVO_STEERING, STEER_RIGHT)
-                self._set_target_speed(40)
+                self._set_target_speed(50)
                 move.forward(self._target_speed)
                 # self._ramp_and_drive() 
 

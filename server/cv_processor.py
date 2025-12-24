@@ -85,6 +85,16 @@ class CVProcessor:
     def get_vehicle_status(self):
         with self._status_lock:
             return dict(self._vehicle_status)
+
+    def pause(self):
+        """Pausa el procesamiento de bandas temporalmente"""
+        self._paused = True
+        print("[CVProcessor] Procesamiento de bandas PAUSADO")
+    
+    def resume(self):
+        """Reanuda el procesamiento de bandas"""
+        self._paused = False
+        print("[CVProcessor] Procesamiento de bandas REANUDADO")
     
     # ----- QR Scanning -----
     def start_qr_scan(self):
@@ -103,15 +113,6 @@ class CVProcessor:
         self._qr_scanning = False
         print("[CVProcessor] Deteniendo escaneo QR...")
     
-    def pause(self):
-        """Pausa el procesamiento de bandas temporalmente"""
-        self._paused = True
-        print("[CVProcessor] Procesamiento de bandas PAUSADO")
-    def resume(self):
-        """Reanuda el procesamiento de bandas"""
-        self._paused = False
-        print("[CVProcessor] Procesamiento de bandas REANUDADO")
-
     def _qr_scan_worker(self):
         """Thread worker que escanea QR codes continuamente"""
         print("[CVProcessor QR] Worker iniciado")
