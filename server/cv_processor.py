@@ -34,6 +34,10 @@ class CVProcessor:
         # Estado de scaneo QR
         self._qr_scanning = False
         self._qr_scan_thread = None
+        
+        # Colores a ignorar en detección (para vision_line)
+        self._ignore_colors = []  # Lista: ['yellow'] o ['white'] o []
+        self._ignore_lock = threading.Lock()
 
         # Multiproceso (fork en RPi para evitar re-imports de GPIO)
         start_method = "fork" if "fork" in mp.get_all_start_methods() else "spawn"
@@ -85,7 +89,7 @@ class CVProcessor:
     def get_vehicle_status(self):
         with self._status_lock:
             return dict(self._vehicle_status)
-
+    
     def pause(self):
         """Pausa el procesamiento de bandas temporalmente"""
         self._paused = True
@@ -95,6 +99,22 @@ class CVProcessor:
         """Reanuda el procesamiento de bandas"""
         self._paused = False
         print("[CVProcessor] Procesamiento de bandas REANUDADO")
+    
+    # ----- Gestión de colores a ignorar -----
+    def set_ignore_colors(self, colors: list):
+        """Establece qué colores debe ignorar vision_line en la detección
+        
+        Args:
+            colors: Lista de colores a ignorar, ej: ['yellow'] o ['white'] o []
+        """
+        with self._ignore_lock:
+            self._ignore_colors = list(colors) if colors else []
+            print(f"[CVProcessor] Colores a ignorar: {self._ignore_colors}")
+    
+    def get_ignore_colors(self):
+        """Obtiene la lista actual de colores a ignorar"""
+        with self._ignore_lock:
+            return list(self._ignore_colors)
     
     # ----- QR Scanning -----
     def start_qr_scan(self):
@@ -113,6 +133,15 @@ class CVProcessor:
         self._qr_scanning = False
         print("[CVProcessor] Deteniendo escaneo QR...")
     
+    def pause(self):
+        """Pausa el procesamiento de bandas temporalmente"""
+        self._paused = True
+        print("[CVProcessor] Procesamiento de bandas PAUSADO")
+    def resume(self):
+        """Reanuda el procesamiento de bandas"""
+        self._paused = False
+        print("[CVProcessor] Procesamiento de bandas REANUDADO")
+
     def _qr_scan_worker(self):
         """Thread worker que escanea QR codes continuamente"""
         print("[CVProcessor QR] Worker iniciado")
@@ -206,10 +235,14 @@ class CVProcessor:
             if (self._frame_i % self._every) == 0:
                 try:
                     small = cv2.resize(frame_bgr, self._algo_size, interpolation=cv2.INTER_AREA)
+                    ignore_colors = self.get_ignore_colors()  # Obtener colores a ignorar
+                    
                     if self._qin.full():
                         try: self._qin.get_nowait()
                         except Exception: pass
-                    self._qin.put_nowait(small)
+                    
+                    # Enviar tupla (frame, ignore_colors) al worker
+                    self._qin.put_nowait((small, ignore_colors))
                 except Exception:
                     pass
 
@@ -258,16 +291,29 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
 
     while True:
         try:
-            small = qin.get()
+            # Recibir tupla (frame, ignore_colors)
+            data = qin.get()
+            if isinstance(data, tuple) and len(data) == 2:
+                small, ignore_colors = data
+            else:
+                # Retrocompatibilidad por si solo recibe frame
+                small = data
+                ignore_colors = []
         except (EOFError, KeyboardInterrupt):
             break
-        except Exception:
+        except Exception as e:
+            print(f"[Worker] Error recibiendo datos: {e}")
             continue
 
         try:
-            # Pedimos a vision_line que pinte los cuadrados sobre una COPIA del frame (BGR)
-            state, overlay = run_line_auto(small, draw_overlays=True)
-        except Exception:
+            # Pasar ignore_colors a vision_line
+            state, overlay = run_line_auto(small, draw_overlays=True, ignore_colors=ignore_colors)
+        except Exception as e:
+            # Log del error para debugging
+            import traceback
+            print(f"[Worker] Error en vision_line: {e}")
+            print(f"[Worker] Traceback: {traceback.format_exc()}")
+            
             h, w = small.shape[:2]
             state, overlay = ({
                 "has_list": [False]*5, "cxs":[None]*5, "errs":[None]*5, "bands":[(0,0)]*5,
@@ -276,6 +322,7 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
                 "has_far":  False, "err_far":  0, "cx_far":  w//2, "band_far":  (0,0),
                 "has_line": False, "err": 0, "cx": w//2,
                 "img_w": w, "img_h": h, "timestamp": time.time(),
+                "color_list": [None]*5,
             }, None)
 
         try:

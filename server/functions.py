@@ -33,7 +33,6 @@ PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO PAN ---
 PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
-PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
 PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
 PAN_MAX_STEP       = 6.0    # Máx grados por ciclo
 PAN_DEADBAND       = 8      # Deadband visual para la cámara
@@ -44,22 +43,19 @@ DRIVE_MAX_SPEED     = 65    # Velocidad en rectas (default)
 MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Velocidades por color
-SPEED_BLACK_BOOST   = 70    # Recta negra a tope (Braver)
+SPEED_BLACK_BOOST   = 80    # Recta negra a tope (Braver)
 SPEED_WHITE_NORMAL  = 50    # Normal
 SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
+
+# Búsqueda de color
+COLOR_SEARCH_SPEED = 55     # Velocidad durante búsqueda de color
 YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
 RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
 RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
 
 # Secuencias de colores
 WHITE_SEQUENCE = ["white", "black"]
-YELLOW_SEQUENCE = ["yellow", "black"]
-USE_YELLOW_SEQUENCE = True
-USE_WHITE_SEQUENCE = True
-
-# Secuencias de colores
-WHITE_SEQUENCE = ["white", "black"]
-YELLOW_SEQUENCE = ["yellow", "black"]
+YELLOW_SEQUENCE = ["yellow", "black", "yellow", "black"]
 USE_YELLOW_SEQUENCE = True
 USE_WHITE_SEQUENCE = True
 
@@ -106,6 +102,10 @@ CUT_FAR_FRAC = 0.30  # máx 15% extra por far
 FAR_PRESTEER_DEG  = 6   # cuando SOLO far ve curva → gira ±10°
 MID_PRESTEER_DEG  = 6   # si mid también la ve → suma ±10°
 NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
+
+# --- Búsqueda activa de color ---
+COLOR_SEARCH_SPEED = 40        # Velocidad durante búsqueda de color correcto
+COLOR_SEARCH_STEER = 60        # Ángulo de giro (60 = derecha suave, 50 = máximo)
 
 # Limitador de velocidad de giro del servo (suaviza cambios bruscos)
 STEER_SLEW_DEG_PER_SEC = 60  # máx grados/seg que puede cambiar el servo
@@ -193,6 +193,13 @@ class Functions(threading.Thread):
         self.qr_cycles_done = 0          # Contador de pasos completados
         self.qr_current_color = None     # Color actual a seguir
         self.qr_needs_read = True        # Flag para saber si necesita leer QR
+        
+        # Búsqueda activa de color (cuando ve color incorrecto)
+        self.color_search_mode = False   # ¿Está buscando el color correcto?
+        self.color_search_target = None  # Color que está buscando ('yellow'/'white')
+        self.color_search_direction = None  # Dirección de búsqueda ('left'/'right')
+        self.color_search_forced = False  # Búsqueda forzada (no se desactiva automáticamente)
+        self.color_search_frames = 0      # Contador de frames en búsqueda forzada
 
         # Motores listos
         try:
@@ -282,7 +289,7 @@ class Functions(threading.Thread):
 
         # --- APLICAR AL MOTOR ---
         v = int(self._current_speed)
-        print("[Functions] Velocidad actual:", v, " Velocidad objetivo:", self._target_speed)
+        print(f"[Functions] Velocidad actual: {v:3d} | Velocidad objetivo: {self._target_speed:3d}", end='\r', flush=True)
 
         # Si la velocidad es muy baja (menor que la mínima para moverse) y el target es 0, paramos.
         # (Mantenemos un pequeño margen para no cortar en seco si estamos frenando suave)
@@ -452,26 +459,54 @@ class Functions(threading.Thread):
         except Exception as e:
             print(f"[trackLine] No se pudo activar trackLine: {e}")
 
-        # Estado de control
+        # ═══════════════════════════════════════════════════════════
+        # RESET COMPLETO DE ESTADOS - Inicio limpio
+        # ═══════════════════════════════════════════════════════════
+        
+        # Estado de control básico
         self._target_speed = 0
         self._current_speed = 0
         self._no_line_frames = 0
         self._line_last_seq = None
         self._last_debug_log = 0.0
         self.line_follow_active = True
+        self._ignore_red_until = 0.0
 
-        # Reset latch
+        # Estados de búsqueda (latch)
         self.last_near_err = None
         self.last_near_side = None
+        self.last_near_color = None
         self.search_latch = None
         self.search_debounce = 0
         self._err_ema = None
         
-        # Reset secuencia de colores
+        # Estados QR
+        self.qr_initial_color = None
+        self.qr_mode = None
+        self.qr_cycles_total = 0
+        self.qr_cycles_done = 0
+        self.qr_current_color = None
+        self.qr_needs_read = True
+        
+        # Estados de búsqueda activa de color
+        self.color_search_mode = False
+        self.color_search_target = None
+        self.color_search_direction = None
+        self.color_search_forced = False
+        self.color_search_frames = 0
+        
+        # Estados legacy (secuencias)
         self.white_sequence_index = 0
         self.yellow_sequence_index = 0
         self.target_color = None
         self.active_sequence = None
+        
+        # Estados PID
+        self._pid_last_err = 0.0
+        self._pid_integral = 0.0
+        self._pid_last_time = time.time()
+        
+        print("[trackLine] ✓ Todos los estados reiniciados - Inicio limpio")
 
         self.functionMode = 'trackLine'
         self.resume()
@@ -535,7 +570,15 @@ class Functions(threading.Thread):
         # ═══════════════════════════════════════════════════════════
         if self.qr_current_color is not None and not self.qr_needs_read:
             # Sistema QR activo - filtrar colores según instrucción QR
+            
+            # Debug: Estado pre-filtro
+            active_before = [(i, color_list[i]) for i in range(len(hasl)) if hasl[i]]
+            # print(f"[Debug PRE-filtro] QR_color={self.qr_current_color}, Bandas: {active_before}")
+            
             filtered_hasl = list(hasl) if hasl else [False]*5
+            filtered_errs = list(errs) if errs else [None]*5  # ← TAMBIÉN COPIAR ERRORES
+            filtered_count = 0
+            
             for i in range(len(filtered_hasl)):
                 if filtered_hasl[i]:
                     band_color = color_list[i]
@@ -544,17 +587,78 @@ class Functions(threading.Thread):
                     if self.qr_current_color == 'yellow':
                         if band_color == 'white':
                             filtered_hasl[i] = False
-                            if i == 4:  # Log solo para banda más cercana
-                                print(f"[QR Filtro] Ignorando BLANCO (sigo AMARILLO)")
+                            filtered_errs[i] = None  # ← LIMPIAR ERROR
+                            filtered_count += 1
+                            print(f"[QR Filtro] Banda {i}: Ignorando BLANCO (sigo AMARILLO)")
                     
                     # Si QR dice seguir BLANCO, ignorar AMARILLO
                     elif self.qr_current_color == 'white':
                         if band_color == 'yellow':
                             filtered_hasl[i] = False
-                            if i == 4:  # Log solo para banda más cercana
-                                print(f"[QR Filtro] Ignorando AMARILLO (sigo BLANCO)")
+                            filtered_errs[i] = None  # ← LIMPIAR ERROR
+                            filtered_count += 1
+                            print(f"[QR Filtro] Banda {i}: Ignorando AMARILLO (sigo BLANCO)")
             
             hasl = filtered_hasl
+            errs = filtered_errs  # ← APLICAR ERRORES FILTRADOS
+            
+            # Debug: Estado post-filtro
+            active_after = [(i, color_list[i]) for i in range(len(hasl)) if hasl[i]]
+            # print(f"[Debug POST-filtro] Filtradas={filtered_count}, Bandas: {active_after}")
+            
+            # ═══════════════════════════════════════════════════════════
+            # BÚSQUEDA ACTIVA: Detectar si solo ve color incorrecto
+            # ═══════════════════════════════════════════════════════════
+            any_correct_color = any(hasl)
+            
+            if not any_correct_color and self.qr_current_color is not None:
+                # No ve el color correcto después del filtro
+                wrong_color = 'white' if self.qr_current_color == 'yellow' else 'yellow'
+                
+                # Verificar si ve el color incorrecto (usando hasl ORIGINAL antes del filtro)
+                sees_wrong_color = any(color_list[i] == wrong_color for i in range(len(active_before)) 
+                                      if i < len(filtered_hasl))
+                
+                if sees_wrong_color:
+                    # Activar búsqueda
+                    if not self.color_search_mode:
+                        print(f"[Color Search] ⚠ Ve {wrong_color.upper()} pero necesita {self.qr_current_color.upper()}")
+                        print(f"[Color Search] → Iniciando búsqueda hacia la DERECHA")
+                        self.color_search_mode = True
+                        self.color_search_target = self.qr_current_color
+            else:
+                # Ve el color correcto DESPUES del filtro
+                if self.color_search_mode:
+                    # Si es búsqueda forzada, requerir detección real en BANDA CRUDA
+                    if self.color_search_forced:
+                        # Incrementar contador
+                        self.color_search_frames += 1
+                        
+                        # Verificar si realmente ve el color en las bandas CRUDAS (raw_band_color)
+                        if raw_band_color == self.color_search_target:
+                            print(f"[Color Search FORCED] ✓ Color {self.color_search_target.upper()} detectado en banda RAW!")
+                            self.color_search_mode = False
+                            self.color_search_target = None
+                            self.color_search_direction = None  # Limpiar dirección
+                            self.color_search_forced = False
+                            self.color_search_frames = 0
+                        elif self.color_search_frames > 50:  # Máximo 50 frames buscando
+                            print(f"[Color Search FORCED] ✗ Timeout - desactivando búsqueda forzada")
+                            self.color_search_mode = False
+                            self.color_search_target = None
+                            self.color_search_direction = None
+                            self.color_search_forced = False
+                            self.color_search_frames = 0
+                        else:
+                            print(f"[Color Search FORCED] Buscando... ({self.color_search_frames}/50 frames)")
+                    else:
+                        # Búsqueda normal (no forzada)
+                        print(f"[Color Search] ✓ Color {self.color_search_target.upper()} encontrado!")
+                        self.color_search_mode = False
+                        self.color_search_target = None
+                        self.color_search_direction = None  # Limpiar dirección
+                        self.color_search_forced = False
+                        self.color_search_frames = 0
         
         # ═══════════════════════════════════════════════════════════
         # SISTEMA LEGACY: Filtrado de colores (mantenido por compatibilidad)
@@ -597,8 +701,8 @@ class Functions(threading.Thread):
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
         
         # Debug: mostrar color actual
-        if current_band_color is not None:
-            print(f"[Color actual] {current_band_color}")
+        # if current_band_color is not None:
+            # print(f"[Color actual] {current_band_color}")
 
         any_band = isinstance(hasl, list) and any(hasl)
 
@@ -701,8 +805,26 @@ class Functions(threading.Thread):
         servo_base = None
         mix_err = None
 
-        # 4.a) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
-        if self.search_latch is not None:
+        # 4.a) Si está en modo búsqueda de color → giro fijo según dirección configurada
+        if self.color_search_mode:
+            # Determinar dirección de giro según configuración
+            if self.color_search_direction == 'right':
+                servo_cmd = STEER_RIGHT
+                dir_str = "DERECHA"
+            elif self.color_search_direction == 'left':
+                servo_cmd = STEER_LEFT
+                dir_str = "IZQUIERDA"
+            else:
+                # Default a derecha si no hay dirección configurada
+                servo_cmd = STEER_RIGHT
+                dir_str = "DERECHA (default)"
+            
+            self._set_target_speed(COLOR_SEARCH_SPEED)  # Velocidad lenta
+            servo_pos = self._steer_command(servo_cmd)
+            print(f"[Color Search] Buscando {self.color_search_target.upper()} → girando {dir_str}")
+
+        # 4.b) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
+        elif self.search_latch is not None:
 
            # Etapa 1: Búsqueda ADELANTE (Gira HACIA el lado perdido)
             if self.search_latch == 'search_forward_right':
@@ -823,9 +945,6 @@ class Functions(threading.Thread):
             if self.qr_needs_read:
                 print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
                 self._motor_stop()
-
-                print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
-                self._motor_stop()
                 
                 # PAUSAR procesamiento de bandas
                 try:
@@ -893,6 +1012,44 @@ class Functions(threading.Thread):
                 print(f"[QR] Modo: {'ALTERNADO' if mode == 'A' else 'ÚNICO'}")
                 print(f"[QR] Ciclos: {cycles}")
                 print(f"[QR] ════════════════════════════")
+                print(f"[QR Debug] qr_current_color = '{self.qr_current_color}'")
+                print(f"[QR Debug] qr_needs_read = {self.qr_needs_read}")
+                
+                # ═══════════════════════════════════════════════════════════
+                # ACTIVAR BÚSQUEDA FORZADA DEL COLOR CON DIRECCIÓN
+                # ═══════════════════════════════════════════════════════════
+                self.color_search_mode = True
+                self.color_search_target = color
+                self.color_search_forced = True  # Marcar como búsqueda FORZADA
+                self.color_search_frames = 0      # Inicializar contador
+                
+                # Configurar dirección según color esperado
+                # GEOMETRÍA DEL CIRCUITO: Amarillo→DERECHA, Blanco→IZQUIERDA
+                if color == 'white':
+                    self.color_search_direction = 'left'  # Blanco está a la IZQUIERDA
+                    print("[QR] 🔍 Activando búsqueda FORZADA de BLANCO → girando IZQUIERDA")
+                    # Desactivar detección de amarillo en vision_line
+                    try:
+                        cvp.set_ignore_colors(['yellow'])
+                        print("[QR] 🚫 Desactivando detección de AMARILLO en vision")
+                    except:
+                        pass
+                elif color == 'yellow':
+                    self.color_search_direction = 'right'   # Amarillo está a la DERECHA
+                    print("[QR] 🔍 Activando búsqueda FORZADA de AMARILLO → girando DERECHA")
+                    # Desactivar detección de blanco en vision_line
+                    try:
+                        cvp.set_ignore_colors(['white'])
+                        print("[QR] 🚫 Desactivando detección de BLANCO en vision")
+                    except:
+                        pass
+                else:
+                    self.color_search_direction = 'left'  # Default izquierda
+                    print(f"[QR] 🔍 Activando búsqueda FORZADA de {color.upper()} → default IZQUIERDA")
+                    try:
+                        cvp.set_ignore_colors([])
+                    except:
+                        pass
                 
                 # REANUDAR procesamiento de bandas
                 try:
@@ -900,6 +1057,7 @@ class Functions(threading.Thread):
                     print("[QR] Bandas reanudadas")
                 except Exception as e:
                     print(f"[QR] Error reanudando bandas: {e}")
+
 
                 # Restaurar cámara a posición normal
                 try:
@@ -921,7 +1079,7 @@ class Functions(threading.Thread):
                 time.sleep(RED_STOP_TIME)
                 
                 # Continuar con velocidad normal
-                self._set_target_speed(60)
+                self._set_target_speed(50)
                 self._ramp_and_drive()
                 self._ignore_red_until = time.time() + RED_IGNORE_TIME
                 print(f"[QR] Continuando por línea {self.qr_current_color.upper()}")
@@ -940,11 +1098,20 @@ class Functions(threading.Thread):
                         # Orden completada
                         self.qr_needs_read = True
                         print(f"[QR] ✓ Orden ÚNICA completada ({self.qr_cycles_total} ciclos)")
-                        print(f"[QR] Próximo rojo leerá nuevo QR")
+                        #print(f"[QR] Próximo rojo leerá nuevo QR")
+                        self._motor_stop()
+                        return
                     else:
                         # Continuar con el mismo color
                         print(f"[QR] Modo ÚNICO: Continúa con {self.qr_current_color.upper()}")
                         print(f"[QR] Progreso: {self.qr_cycles_done}/{self.qr_cycles_total}")
+
+                        # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
+                        self._ignore_red_until = time.time() + RED_IGNORE_TIME
+                        
+                        # NO PARAR - continuar inmediatamente
+                        print(f"[QR] Pasando por rojo sin detenerse...")
+                        return
                 
                 # Modo Alternado (A)
                 elif self.qr_mode == 'A':
@@ -954,7 +1121,9 @@ class Functions(threading.Thread):
                         # Orden completada
                         self.qr_needs_read = True
                         print(f"[QR] ✓ Orden ALTERNADA completada ({self.qr_cycles_total} ciclos = {total_stops} paradas)")
-                        print(f"[QR] Próximo rojo leerá nuevo QR")
+                        # print(f"[QR] Próximo rojo leerá nuevo QR")
+                        self._motor_stop()
+                        return
                     else:
                         # Alternar color
                         if self.qr_current_color == 'yellow':
@@ -964,13 +1133,26 @@ class Functions(threading.Thread):
                         
                         print(f"[QR] Modo ALTERNADO: Cambia a {self.qr_current_color.upper()}")
                         print(f"[QR] Progreso: {self.qr_cycles_done}/{total_stops} paradas")
+                        
+                        # Actualizar colores a ignorar en vision
+                        try:
+                            cam = Camera.get_instance()
+                            cvp = cam.cv_thread
+                            if self.qr_current_color == 'white':
+                                cvp.set_ignore_colors(['yellow'])
+                                print("[QR] 🚫 Desactivando detección de AMARILLO en vision")
+                            elif self.qr_current_color == 'yellow':
+                                cvp.set_ignore_colors(['white'])
+                                print("[QR] 🚫 Desactivando detección de BLANCO en vision")
+                        except Exception as e:
+                            print(f"[QR] Error actualizando ignore_colors: {e}")
                 
-                # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
-                self._ignore_red_until = time.time() + RED_IGNORE_TIME
-                
-                # NO PARAR - continuar inmediatamente
-                print(f"[QR] Pasando por rojo sin detenerse...")
-                return
+                        # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
+                        self._ignore_red_until = time.time() + RED_IGNORE_TIME
+                        
+                        # NO PARAR - continuar inmediatamente
+                        print(f"[QR] Pasando por rojo sin detenerse...")
+                        return
 
 
         if self.search_latch is not None:
@@ -981,6 +1163,11 @@ class Functions(threading.Thread):
                 else:
                     self._set_target_speed(SEARCH_TURN_SPEED) # 40
                 self._ramp_and_drive()
+            elif self.last_near_color == 'red' and self.qr_current_color == 'white':
+                try:
+                    RPIservo.move(SERVO_PAN, PAN_MAX_LEFT)
+                except Exception:
+                    pass
             else:
                 try: # REVERSA FUERTE
                     move.backward(SEARCH_REVERSE_SPEED) # 38
