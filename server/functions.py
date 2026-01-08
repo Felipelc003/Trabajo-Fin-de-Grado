@@ -43,7 +43,7 @@ DRIVE_MAX_SPEED     = 65    # Velocidad en rectas (default)
 MIN_MOVE_SPEED      = 30    # vencer rozamiento
 
 # Velocidades por color
-SPEED_BLACK_BOOST   = 70    # Recta negra a tope (Braver)
+SPEED_BLACK_BOOST   = 80    # Recta negra a tope (Braver)
 SPEED_WHITE_NORMAL  = 50    # Normal
 SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
 
@@ -55,7 +55,7 @@ RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
 
 # Secuencias de colores
 WHITE_SEQUENCE = ["white", "black"]
-YELLOW_SEQUENCE = ["yellow", "black"]
+YELLOW_SEQUENCE = ["yellow", "black", "yellow", "black"]
 USE_YELLOW_SEQUENCE = True
 USE_WHITE_SEQUENCE = True
 
@@ -1163,10 +1163,10 @@ class Functions(threading.Thread):
                 else:
                     self._set_target_speed(SEARCH_TURN_SPEED) # 40
                 self._ramp_and_drive()
-            elif self.last_near_color == 'white' or self.qr_current_color == 'white':
+            elif self.last_near_color == 'red' and self.qr_current_color == 'white':
                 try:
                     RPIservo.move(SERVO_PAN, PAN_MAX_LEFT)
-                except Exception: 
+                except Exception:
                     pass
             else:
                 try: # REVERSA FUERTE
