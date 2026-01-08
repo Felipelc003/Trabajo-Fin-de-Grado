@@ -262,7 +262,15 @@ def _score_contour(contour, band_area, corridor_center=None, cx_rect=None):
 # ==========================
 def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
                       corridor_center=None, corridor_half=None,
-                      draw_overlays=True, overlay=None):
+                      draw_overlays=True, overlay=None, ignore_colors=None):
+    """Detecta línea en una banda, opcionalmente ignorando ciertos colores.
+    
+    Args:
+        ignore_colors: Lista de colores a NO detectar, ej: ['yellow', 'white']
+    """
+    if ignore_colors is None:
+        ignore_colors = []
+    
     y1 = int(h * Y_FRACS[idx][0])
     y2 = int(h * Y_FRACS[idx][1])
     roi_bgr = frame[y1:y2, :]
@@ -270,10 +278,12 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
     roi_gray = gray_full[y1:y2, :]
 
     k = KERNEL_SIZES[idx]
-    m_white = _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=k)
-    m_black = _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=k)
-    m_red = _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=k)
-    m_yellow = _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=k)
+    
+    # Detectar solo los colores que NO están en ignore_colors
+    m_white = _mask_white(roi_bgr, roi_hsv, roi_gray, ksize=k) if 'white' not in ignore_colors else np.zeros_like(roi_gray)
+    m_black = _mask_black(roi_bgr, roi_hsv, roi_gray, ksize=k) if 'black' not in ignore_colors else np.zeros_like(roi_gray)
+    m_red = _mask_red(roi_bgr, roi_hsv, roi_gray, ksize=k) if 'red' not in ignore_colors else np.zeros_like(roi_gray)
+    m_yellow = _mask_yellow(roi_bgr, roi_hsv, roi_gray, ksize=k) if 'yellow' not in ignore_colors else np.zeros_like(roi_gray)
 
     c_b = _largest_contour(m_black)
     c_w = _largest_contour(m_white)
@@ -404,13 +414,27 @@ def _detect_band_auto(idx, frame, hsv_full, gray_full, w, h,
 # ==========================
 # Función principal AUTO
 # ==========================
-def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
+def run_line_auto(frame: np.ndarray, draw_overlays: bool = True, ignore_colors: list = None):
+    """
+    Detecta líneas (black, white, yellow, red) automáticamente y retorna
+    bandas + overlays.
+    
+    Args:
+        frame: Frame BGR de entrada
+        draw_overlays: Si dibujar overlays
+        ignore_colors: Lista de colores a NO detectar, ej: ['yellow'] o ['white']
+    
+    Returns:
+        (state_dict, overlay_frame)
+    """
+    if ignore_colors is None:
+        ignore_colors = []
+    
     h, w = frame.shape[:2]
+    gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     center_x = w // 2
     overlay = frame.copy() if draw_overlays else None
-
-    hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     # Guías de filas
     if draw_overlays and overlay is not None and ROW_MODE:
@@ -444,7 +468,8 @@ def run_line_auto(frame: np.ndarray, draw_overlays: bool = True):
             i, frame, hsv_full, gray_full, w, h,
             corridor_center=expected if half_eff is not None else None,
             corridor_half=half_eff,
-            draw_overlays=draw_overlays, overlay=overlay
+            draw_overlays=draw_overlays, overlay=overlay,
+            ignore_colors=ignore_colors  # PASAR ignore_colors
         )
 
         # --- NUEVO FILTRO DE CONTINUIDAD ---

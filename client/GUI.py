@@ -49,6 +49,37 @@ def global_init():
     color_can='#212121'; color_oval='#2196F3'; target_color='#FF6D00'; speed=1; ip_stu=1
     Switch_3=0; Switch_2=0; Switch_1=0; servo_stu=0; function_stu=0
 
+def reset_client_state():
+    """
+    Resetea TODOS los estados del cliente al conectarse para garantizar
+    que cada conexión sea completamente limpia, como si se iniciara la app.
+    """
+    global DS_stu, TS_stu, speed, Switch_3, Switch_2, Switch_1
+    global function_button_active, steering_state, camera_pan_state, camera_tilt_state
+    global hsv_mode, hsv_windows_created
+    global video_thread, video_stop_event
+    
+    # Estados básicos
+    DS_stu = 0
+    TS_stu = 0
+    speed = 1
+    Switch_3 = 0
+    Switch_2 = 0
+    Switch_1 = 0
+    
+    # Estados de interfaz
+    function_button_active = None
+    steering_state = 'center'
+    camera_pan_state = 'stop'
+    camera_tilt_state = 'stop'
+    
+    # Estados HSV
+    hsv_mode = False
+    if hsv_windows_created:
+        _hsv_destroy_windows()
+    
+    print("[GUI] ✓ Estados del cliente reiniciados - Conexión limpia")
+
 global_init()
 
 # --- Lógica de Websockets ---
@@ -120,15 +151,26 @@ def show_video_stream(ip_address, stop_event):
     window_created = False
     cap = None
     first_size_set = False  # solo si usas WINDOW_NORMAL
+    
+    # Limpiar ventanas residuales de sesiones anteriores
+    try:
+        cv2.destroyWindow(window_name)
+        cv2.waitKey(1)
+        print(f"[VIDEO] Ventana '{window_name}' limpiada antes de iniciar")
+    except Exception:
+        pass
 
     while not stop_event.is_set():
         # (Re)abrir captura si hace falta
         if cap is None or not cap.isOpened():
+            print(f"[VIDEO] Intentando abrir captura de video...")
             try:
                 if cap is not None:
                     cap.release()
                 cap = cv2.VideoCapture(video_url)
-            except Exception:
+                print(f"[VIDEO] VideoCapture creado, isOpened={cap.isOpened() if cap else 'None'}")
+            except Exception as e:
+                print(f"[VIDEO] Error creando VideoCapture: {e}")
                 cap = None
 
             # Espera breve a que abra
@@ -138,11 +180,13 @@ def show_video_stream(ip_address, stop_event):
                 if cap is not None and not cap.isOpened():
                     cap.open(video_url)
             if cap is None or not cap.isOpened():
+                print(f"[VIDEO] No se pudo abrir stream después de 3s, reintentando...")
                 time.sleep(0.5)
                 continue
 
         ret, frame = cap.read()
         if not ret:
+            print(f"[VIDEO] cap.read() retornó False, reintentando...")
             time.sleep(0.2)
             # fuerza reintento limpio
             cap.release()
@@ -151,6 +195,7 @@ def show_video_stream(ip_address, stop_event):
 
         # --- CREACIÓN/CONFIGURACIÓN DE VENTANA ---
         if not window_created:
+            print(f"[VIDEO] Creando ventana '{window_name}'...")
             # Opción A: grande como el frame (comportamiento anterior)
             cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
@@ -161,6 +206,7 @@ def show_video_stream(ip_address, stop_event):
             # first_size_set = True
 
             window_created = True
+            print(f"[VIDEO] ✓ Ventana creada y stream funcionando")
 
         # --- HSV (si activo) ---
         if hsv_mode:
@@ -226,6 +272,12 @@ async def network_loop(ip_address, port):
         async with websockets.connect(uri) as ws:
             websocket = ws
             print("Conectado al servidor websocket!")
+            
+            # ═══════════════════════════════════════════════════════════
+            # RESET COMPLETO DE ESTADOS - Inicio limpio en cada conexión
+            # ═══════════════════════════════════════════════════════════
+            reset_client_state()
+            
             l_ip_4.config(text='Connected', bg='#558B2F'); l_ip_5.config(text=f'IP:{ip_address}')
             E1.config(state='disabled'); Btn14.config(state='disabled'); ip_stu=0
             with open("last_ip.txt", "w") as f:
