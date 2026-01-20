@@ -32,8 +32,8 @@ PAN_MAX_LEFT       = 130    # Límite físico
 PAN_MAX_RIGHT      = 40
 
 # --- AJUSTES DE SUAVIZADO PAN ---
-PAN_GAIN           = 0.03   # Ganancia visual (reducido de 0.05 para más suavidad)
-PAN_CENTER_FORCE   = 0.03   # Fuerza de retorno al centro
+PAN_GAIN           = 0.05   # Ganancia visual (reducido de 0.05 para más suavidad)
+PAN_CENTER_FORCE   = 0.01   # Fuerza de retorno al centro
 PAN_MAX_STEP       = 6.0    # Máx grados por ciclo
 PAN_DEADBAND       = 8      # Deadband visual para la cámara
 
@@ -88,20 +88,19 @@ RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
 
 # --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
 # Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
-WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.30, 0.70]  # suma ≈ 1.0
-PRED_GAIN   = 0.35   # anticipación usando gradiente bottom-top
+WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.25, 0.75]  # suma ≈ 1.0
+PRED_GAIN   = 0.15   # anticipación usando gradiente bottom-top
 
 # --- Recortes suaves por MID/FAR (opcional) ---
-MID_ERR_SLOW_THRESH = 100
-FAR_ERR_SLOW_THRESH = 130
-CUT_MID_FRAC = 0.15  # máx 15% extra por mid
-CUT_FAR_FRAC = 0.30  # máx 15% extra por far
+MID_ERR_SLOW_THRESH = 150
+FAR_ERR_SLOW_THRESH = 200
+CUT_MID_FRAC = 0.05  # máx 15% extra por mid
+CUT_FAR_FRAC = 0.05  # máx 15% extra por far
 
 # --- Pre-giro anticipado por bandas ---
-FAR_PRESTEER_DEG  = 6   # cuando SOLO far ve curva → gira ±10°
-MID_PRESTEER_DEG  = 6   # si mid también la ve → suma ±10°
-NEAR_PRESTEER_DEG = 8   # cuando near ya la ve → suma ligera (consolidación)
+FAR_PRESTEER_DEG  = 0   # cuando SOLO far ve curva → gira ±10°
+MID_PRESTEER_DEG  = 3   # si mid también la ve → suma ±10°
+NEAR_PRESTEER_DEG = 10   # cuando near ya la ve → suma ligera (consolidación)
 
 # --- Búsqueda activa de color ---
 COLOR_SEARCH_SPEED = 40        # Velocidad durante búsqueda de color correcto
@@ -127,7 +126,7 @@ SEARCH_REACQUIRE_CENTER_PX = 40   # Umbral (en píxeles) para considerar la lín
 NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
 
 # --- Suavizado del error ---
-ERR_EMA_ALPHA     = 0.40   # 0..1 (más alto = responde más rápido)
+ERR_EMA_ALPHA     = 0.50   # 0..1 (más alto = responde más rápido)
 ERR_EMA_ALPHA_BLACK = 0.15 # Muy bajo para suavizar recta negra
 ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
 TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
@@ -1027,6 +1026,7 @@ class Functions(threading.Thread):
                 # GEOMETRÍA DEL CIRCUITO: Amarillo→DERECHA, Blanco→IZQUIERDA
                 if color == 'white':
                     self.color_search_direction = 'left'  # Blanco está a la IZQUIERDA
+                    RPIservo.move(SERVO_PAN, 100)
                     print("[QR] 🔍 Activando búsqueda FORZADA de BLANCO → girando IZQUIERDA")
                     # Desactivar detección de amarillo en vision_line
                     try:
@@ -1036,6 +1036,7 @@ class Functions(threading.Thread):
                         pass
                 elif color == 'yellow':
                     self.color_search_direction = 'right'   # Amarillo está a la DERECHA
+                    RPIservo.move(SERVO_PAN, 70)
                     print("[QR] 🔍 Activando búsqueda FORZADA de AMARILLO → girando DERECHA")
                     # Desactivar detección de blanco en vision_line
                     try:

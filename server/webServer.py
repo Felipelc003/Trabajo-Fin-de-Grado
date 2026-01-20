@@ -16,7 +16,6 @@ import move
 import RPIservo
 import functions
 import robotLight
-import switch
 import app
 
 # =================== Estado global ===================
@@ -349,10 +348,6 @@ async def main_logic(websocket, path):
 
 # =================== Main ===================
 if __name__ == '__main__':
-    # GPIO de switches (si los usas)
-    switch.switchSetup()
-    switch.set_all_switch_off()
-
     # Motor único en canal A
     move.setup()
 

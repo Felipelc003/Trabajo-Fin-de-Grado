@@ -1,15 +1,21 @@
-
-venv/
-server/__pycache__/
-venv/
+# Archivos compilados de Python
 __pycache__/
-
-__pycache__/
-
 *.py[cod]
+*$py.class
 
-*.pyo
+# Entornos virtuales (si creaste uno)
+venv/
+env/
+.env
 
-*.pyd
-*.pytest_cache/
+# Archivos de sistema
+.DS_Store
+Thumbs.db
 
+# Logs y bases de datos temporales
+*.log
+*.sqlite
+
+# IDEs
+.vscode/
+.idea/
