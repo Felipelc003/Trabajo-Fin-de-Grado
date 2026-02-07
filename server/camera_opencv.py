@@ -176,14 +176,14 @@ class Camera(BaseCamera):
             try:
                 vs = cam._cv.get_vehicle_status() if (cam._cv is not None) else {}
                 v_speed = int(vs.get('speed', 0))
-                v_steer = int(vs.get('steer', 90))
+                v_steer = int(vs.get('steer', 88.5))
             except Exception:
-                v_speed, v_steer = 0, 90
+                v_speed, v_steer = 0, 88.5
 
             v_steer = max(60, min(130, v_steer)) # Limitación visual del ángulo
 
             try:
-                hud = f"FPS {cam._fps_value:.1f}  Q{cam._jpeg_quality}  v {v_speed:>3}  \u03B8 {v_steer:>3}"
+                hud = f"FPS {cam._fps_value:.1f}  Vel {v_speed:>3}  Giro {v_steer:>3}"
                 cv2.putText(
                     img, hud, (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (30, 230, 30), 2, cv2.LINE_AA,

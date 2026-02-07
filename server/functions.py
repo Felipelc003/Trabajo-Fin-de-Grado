@@ -239,6 +239,24 @@ class Functions(threading.Thread):
     # Métodos Auxiliares de Movimiento y Control
     # ---------------------------------------------------------
 
+    def _update_telemetry(self, speed=None, steer=None):
+        """
+        Envía la telemetría actual (velocidad y dirección) al sistema de cámara
+        para que se muestre en el HUD.
+        """
+        # Usar valores cacheados si no se especifican
+        s = int(self._current_speed) if speed is None else int(speed)
+        t = int(self._servo_last_angle) if steer is None else int(steer)
+        
+        try:
+            # Obtener instancia de cámara (Singleton) y actualizar procesador
+            cam = Camera.get_instance()
+            if cam and cam.cv_thread:
+                cam.cv_thread.set_vehicle_status(s, t)
+        except Exception:
+            pass # Evitar bloquear el hilo de control si la cámara falla
+
+
     def _update_pan_servo(self, error_px):
         """
         Sistema de "Mirada Activa" (Active Gaze).
@@ -328,10 +346,12 @@ class Functions(threading.Thread):
 
         if (not self.line_follow_active) or (v < MIN_MOVE_SPEED and self._target_speed == 0):
             self._motor_stop()
+            self._update_telemetry(speed=0) # Actualizar telemetría a 0
             return
 
         try:
             move.forward(v)
+            self._update_telemetry(speed=v) # Actualizar telemetría de velocidad
         except Exception:
             self._motor_stop()
 
@@ -369,6 +389,8 @@ class Functions(threading.Thread):
 
         self._servo_last_angle = target_deg
         self._servo_last_time  = now
+        
+        self._update_telemetry(steer=target_deg) # Actualizar telemetría de dirección
         return target_deg
 
     def _filter_mix_err(self, err, alpha=ERR_EMA_ALPHA):
