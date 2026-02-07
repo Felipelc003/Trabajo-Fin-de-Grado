@@ -1,5 +1,12 @@
 # cv_processor.py
-# Orquesta el modo lineBlack en OTRO PROCESO y publica estado + overlay.
+# Descripción: Módulo orquestador de visión artificial.
+# Este componente implementa una arquitectura Productor-Consumidor utilizando multiprocesamiento para separar
+# la captura de video del análisis intensivo de imágenes (detección de líneas).
+# Además, gestiona un hilo dedicado para el escaneo de códigos QR, asegurando un rendimiento fluido.
+# Características:
+# - Multiprocesamiento para evitar bloqueo por GIL (Global Interpreter Lock).
+# - Hilo secundario para lectura de códigos QR con la librería pyzbar.
+# - Comunicación Inter-Procesos (IPC) mediante Colas.
 
 import time
 import threading
@@ -11,67 +18,108 @@ import numpy as np
 from pyzbar import pyzbar
 
 class CVProcessor:
+    """
+    Clase principal de procesamiento de visión (Controlador).
+    
+    Actúa como interfaz entre la cámara y los algoritmos de análisis. Recibe los fotogramas,
+    los submuestrea y los envía a un proceso "worker" independiente para detectar líneas.
+    Paralelamente, puede activar un escáner de códigos QR en segundo plano.
+    
+    Atributos:
+        mode (str): Modo de operación actual (ej. 'trackLine', 'none').
+        _line_state (dict): Diccionario compartido con el estado actual de la detección (error, centro, etc.).
+        _vision_proc (Process): Proceso independiente encargado de ejecutar `vision_line.py`.
+    """
     def __init__(self):
+        """
+        Constructor de la clase CVProcessor.
+        Inicializa las estructuras de datos, bloqueos de hilos (Locks) y el proceso de trabajo (Worker).
+        """
         self.mode: str = "none"
         self.draw_overlays: bool = True
-        self.frame = None  # Frame actual para lectura QR
+        self.frame = None  # Buffer para almacenar el frame actual accesible por el hilo QR.
         self._paused = False
 
+        # --- Estado Compartido de la Detección de Línea ---
+        # Almacena métricas críticas como el error de alineación (err) y coordenadas (cx).
+        # Se protege con un Lock para evitar condiciones de carrera entre el hilo que recibe datos y el que los lee.
         self._line_state = {
             "has_line": False, "err": 0, "cx": None,
             "img_w": 0, "img_h": 0, "timestamp": 0.0,
-            # Datos QR
-            "qr_data": None,        # String del QR leído (ej: "Y-A-2")
-            "qr_color": None,       # 'yellow' o 'white'
-            "qr_mode": None,        # 'A' o 'U'
-            "qr_cycles": None,      # número entero
-            "qr_valid": False,      # True si se leyó un QR válido
-            "qr_timestamp": 0.0,    # Cuándo se leyó el QR
+            # Datos específicos del subsistema QR
+            "qr_data": None,        
+            "qr_color": None,       
+            "qr_mode": None,        
+            "qr_cycles": None,      
+            "qr_valid": False,      
+            "qr_timestamp": 0.0,    
         }
         self._line_lock = threading.Lock()
-        self._line_seq = 0
+        self._line_seq = 0 # Secuencial para sincronización y detección de nuevos datos.
         
-        # Estado de scaneo QR
+        # --- Configuración del Escáner QR ---
         self._qr_scanning = False
         self._qr_scan_thread = None
         
-        # Colores a ignorar en detección (para vision_line)
-        self._ignore_colors = []  # Lista: ['yellow'] o ['white'] o []
+        # Filtros dinámicos de color (ignorados por el algoritmo de visión)
+        self._ignore_colors = []  
         self._ignore_lock = threading.Lock()
 
-        # Multiproceso (fork en RPi para evitar re-imports de GPIO)
+        # --- Multiprocesamiento ---
+        # Configuración del método de inicio del proceso. 'fork' es preferible en Unix/Linux
+        # por su eficiencia en clonar el espacio de memoria (Copy-on-Write).
         start_method = "fork" if "fork" in mp.get_all_start_methods() else "spawn"
         ctx = mp.get_context(start_method)
 
-        self._qin = ctx.Queue(maxsize=1)   # Frame pequeño -> worker
-        self._qout = ctx.Queue(maxsize=1)  # (state, overlay) <- worker
-        self._algo_size = (320, 240)
-        self._every = 3   # procesa 1 de cada N frames
+        # Colas de comunicación Inter-Procesos (IPC)
+        # _qin: Envía frames reducidos del proceso principal al worker.
+        # _qout: Recibe tuplas (Estado, Overlay) del worker al proceso principal.
+        self._qin = ctx.Queue(maxsize=1)   
+        self._qout = ctx.Queue(maxsize=1)  
+        self._algo_size = (320, 240)       # Resolución optimizada para procesamiento rápido.
+        self._every = 3                    # Factor de submuestreo temporal (procesar 1 de cada 3 frames).
 
-        self._vehicle_status = {'speed': 0, 'steer': 90}
+        self._vehicle_status = {'speed': 0, 'steer': 88.5}
         self._status_lock = threading.Lock()
 
+        # Inicialización y arranque del Proceso de Visión
         self._vision_proc = ctx.Process(
             target=_vision_worker_main,
             args=(self._qin, self._qout, self._algo_size),
-            daemon=True,
+            daemon=True, # El proceso morirá si el programa principal termina.
         )
         self._vision_proc.start()
 
         self._last_overlay: Optional[np.ndarray] = None
-        self._frame_i = 0
+        self._frame_i = 0 # Contador de frames para el submuestreo
 
+        # Optimización de OpenCV para desactivar su propio threading interno y evitar conflictos.
         try: cv2.setNumThreads(1)
         except Exception: pass
 
-    # ----- estado público -----
+    # ---------------------------------------------------------
+    # Métodos de Acceso al Estado (Thread-Safe)
+    # ---------------------------------------------------------
+
     def _publish_line_state(self, st: dict):
+        """Actualiza el estado interno con los resultados recibidos del worker."""
         with self._line_lock:
             self._line_state = st
             self._line_seq += 1
 
     def get_line_state(self, wait_new: bool = False, last_seq: Optional[int] = None,
                        timeout: float = 0.25):
+        """
+        Recupera el estado actual de la visión.
+        
+        Parámetros:
+        - wait_new (bool): Si es True, bloquea hasta recibir un dato más reciente que last_seq.
+        - last_seq (int): Último número de secuencia procesado por el cliente.
+        - timeout (float): Tiempo máximo de espera en segundos.
+        
+        Retorna:
+        - Tupla (estado, secuencia actual).
+        """
         if wait_new and last_seq is not None:
             t0 = time.time()
             while (time.time() - t0) < timeout:
@@ -83,170 +131,164 @@ class CVProcessor:
             return dict(self._line_state), self._line_seq
 
     def set_vehicle_status(self, speed: int, steer: int):
+        """Actualiza el estado conocido del vehículo (telemetría)."""
         with self._status_lock:
             self._vehicle_status = {'speed': int(speed), 'steer': int(steer)}
 
     def get_vehicle_status(self):
+        """Devuelve una copia del estado del vehículo."""
         with self._status_lock:
             return dict(self._vehicle_status)
     
+    # ---------------------------------------------------------
+    # Control de Flujo del Procesamiento
+    # ---------------------------------------------------------
+
     def pause(self):
-        """Pausa el procesamiento de bandas temporalmente"""
+        """Pausa temporalmente el envío de frames al worker."""
         self._paused = True
-        print("[CVProcessor] Procesamiento de bandas PAUSADO")
+        print("[CVProcessor] Procesamiento pausado.")
     
     def resume(self):
-        """Reanuda el procesamiento de bandas"""
+        """Reanuda el procesamiento de visión."""
         self._paused = False
-        print("[CVProcessor] Procesamiento de bandas REANUDADO")
+        print("[CVProcessor] Procesamiento reanudado.")
     
-    # ----- Gestión de colores a ignorar -----
     def set_ignore_colors(self, colors: list):
-        """Establece qué colores debe ignorar vision_line en la detección
-        
-        Args:
-            colors: Lista de colores a ignorar, ej: ['yellow'] o ['white'] o []
-        """
+        """Actualiza la lista de colores a ignorar durante la segmentación."""
         with self._ignore_lock:
             self._ignore_colors = list(colors) if colors else []
-            print(f"[CVProcessor] Colores a ignorar: {self._ignore_colors}")
     
     def get_ignore_colors(self):
-        """Obtiene la lista actual de colores a ignorar"""
+        """Obtiene la lista actual de colores ignorados."""
         with self._ignore_lock:
             return list(self._ignore_colors)
     
-    # ----- QR Scanning -----
+    # ---------------------------------------------------------
+    # Sistema de Escaneo QR (Segundo Plano)
+    # ---------------------------------------------------------
+
     def start_qr_scan(self):
-        """Inicia el escaneo de QR en un thread separado"""
+        """Inicia el hilo dedicado a la detección de códigos QR."""
         if self._qr_scanning:
-            print("[CVProcessor] QR scan ya está activo")
             return
         
         self._qr_scanning = True
         self._qr_scan_thread = threading.Thread(target=self._qr_scan_worker, daemon=True)
         self._qr_scan_thread.start()
-        print("[CVProcessor] Iniciando escaneo QR...")
+        print("[CVProcessor] Iniciando escaneo QR.")
     
     def stop_qr_scan(self):
-        """Detiene el escaneo de QR"""
+        """Detiene el hilo de escaneo QR."""
         self._qr_scanning = False
-        print("[CVProcessor] Deteniendo escaneo QR...")
-    
-    def pause(self):
-        """Pausa el procesamiento de bandas temporalmente"""
-        self._paused = True
-        print("[CVProcessor] Procesamiento de bandas PAUSADO")
-    def resume(self):
-        """Reanuda el procesamiento de bandas"""
-        self._paused = False
-        print("[CVProcessor] Procesamiento de bandas REANUDADO")
+        print("[CVProcessor] Deteniendo escaneo QR.")
 
     def _qr_scan_worker(self):
-        """Thread worker que escanea QR codes continuamente"""
-        print("[CVProcessor QR] Worker iniciado")
+        """
+        Lógica del hilo de decodificación QR.
+        
+        Analiza periódicamente el frame actual almacenado (`self.frame`) utilizando la librería pyzbar.
+        Si detecta un código válido con formato 'Color-Modo-Ciclos' (ej. 'Yellow-A-3'), actualiza
+        el estado compartido y detiene el escaneo automáticamente.
+        """
+        print("[CVProcessor QR] Worker iniciado.")
         
         while self._qr_scanning:
             try:
-                # Usar el frame actual
                 if self.frame is None:
                     time.sleep(0.1)
                     continue
                 
+                # Copia para evitar conflictos de lectura/escritura con el hilo principal
                 frame = self.frame.copy()
-                
-                # Convertir a escala de grises
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
-                # Detectar códigos QR
                 decoded_objects = pyzbar.decode(gray)
                 
                 if decoded_objects:
                     for obj in decoded_objects:
-                        # Decodificar el texto del QR
                         qr_data = obj.data.decode('utf-8').strip().upper()
-                        print(f"[CVProcessor QR] Código detectado: {qr_data}")
                         
-                        # Parsear formato C-M-N
+                        # Validación del formato esperado: C-M-N
                         parts = qr_data.split('-')
                         if len(parts) == 3:
                             color_code, mode_code, cycles_str = parts
                             
-                            # Validar color
+                            # Validaciones específicas de negocio
+                            valid_color = False
                             if color_code == 'Y':
-                                color = 'yellow'
+                                color = 'yellow'; valid_color = True
                             elif color_code == 'W':
-                                color = 'white'
-                            else:
-                                print(f"[CVProcessor QR] Color inválido: {color_code}")
-                                continue
+                                color = 'white'; valid_color = True
                             
-                            # Validar modo
-                            if mode_code not in ['A', 'U']:
-                                print(f"[CVProcessor QR] Modo inválido: {mode_code}")
-                                continue
+                            valid_mode = mode_code in ['A', 'U']
                             
-                            # Validar ciclos
                             try:
                                 cycles = int(cycles_str)
-                                if cycles <= 0:
-                                    print(f"[CVProcessor QR] Ciclos inválido: {cycles}")
-                                    continue
+                                valid_cycles = cycles > 0
                             except ValueError:
-                                print(f"[CVProcessor QR] Ciclos no numérico: {cycles_str}")
-                                continue
+                                valid_cycles = False
                             
-                            # QR válido encontrado - publicar en line_state
-                            print(f"[CVProcessor QR] ✓ QR válido: Color={color}, Modo={mode_code}, Ciclos={cycles}")
-                            
-                            with self._line_lock:
-                                self._line_state['qr_data'] = qr_data
-                                self._line_state['qr_color'] = color
-                                self._line_state['qr_mode'] = mode_code
-                                self._line_state['qr_cycles'] = cycles
-                                self._line_state['qr_valid'] = True
-                                self._line_state['qr_timestamp'] = time.time()
-                                self._line_seq += 1
-                            
-                            # Detener escaneo después de leer un QR válido
-                            self._qr_scanning = False
-                            print("[CVProcessor QR] QR válido leído - deteniendo escaneo")
-                            return
-                        else:
-                            print(f"[CVProcessor QR] Formato inválido: {qr_data}")
+                            if valid_color and valid_mode and valid_cycles:
+                                print(f"[CVProcessor QR] QR Válido detectado: {color}, {mode_code}, {cycles}")
+                                
+                                with self._line_lock:
+                                    self._line_state['qr_data'] = qr_data
+                                    self._line_state['qr_color'] = color
+                                    self._line_state['qr_mode'] = mode_code
+                                    self._line_state['qr_cycles'] = cycles
+                                    self._line_state['qr_valid'] = True
+                                    self._line_state['qr_timestamp'] = time.time()
+                                    self._line_seq += 1
+                                
+                                self._qr_scanning = False
+                                return
                 
-                # Pequeña pausa
-                time.sleep(0.1)
+                time.sleep(0.1) # Tasa de refresco moderada para no saturar CPU
                 
             except Exception as e:
-                print(f"[CVProcessor QR] Error: {e}")
+                print(f"[CVProcessor QR] Excepción en worker: {e}")
                 time.sleep(0.1)
         
-        print("[CVProcessor QR] Worker finalizado")
+        print("[CVProcessor QR] Worker finalizado.")
 
+    # ---------------------------------------------------------
+    # Integración con Pipeline de Cámara
+    # ---------------------------------------------------------
 
-    # ----- llamado desde la cámara para pegar overlay y alimentar worker -----
     def draw_elements_on_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
-        # Guardar frame actual para lectura QR
-        self.frame = frame_bgr
+        """
+        Método de orquestación llamado cíclicamente por el hilo de la cámara.
+        
+        1. Actualiza el buffer de imagen para el escáner QR.
+        2. Envía frames al proceso worker (aplicando submuestreo temporal).
+        3. Recoge resultados asíncronos del worker.
+        4. Superpone gráficos de depuración (overlays) si están habilitados.
+        
+        Retorna:
+            El frame original (posiblemente modificado con superposiciones).
+        """
+        self.frame = frame_bgr # Actualización buffer QR
         
         if self.mode == "trackLine" and not self._paused:
             self._frame_i += 1
+            
+            # Submuestreo y Envío al proceso worker
             if (self._frame_i % self._every) == 0:
                 try:
                     small = cv2.resize(frame_bgr, self._algo_size, interpolation=cv2.INTER_AREA)
-                    ignore_colors = self.get_ignore_colors()  # Obtener colores a ignorar
+                    ignore_colors = self.get_ignore_colors()
                     
+                    # Manejo de la cola llena: Descartes el frame más antiguo si es necesario.
                     if self._qin.full():
                         try: self._qin.get_nowait()
                         except Exception: pass
                     
-                    # Enviar tupla (frame, ignore_colors) al worker
                     self._qin.put_nowait((small, ignore_colors))
                 except Exception:
                     pass
 
-            # drenar resultados
+            # Recogida de resultados (Non-blocking)
+            # Se intenta vaciar la cola para obtener siempre el resultado más fresco disponible.
             got = False
             st = ov = None
             while True:
@@ -258,62 +300,64 @@ class CVProcessor:
 
             if got:
                 self._publish_line_state(st)
-                # guardamos overlay solo si queremos dibujarlo
                 self._last_overlay = ov if self.draw_overlays else None
 
         else:
             self._last_overlay = None
 
-        # === RENDER ===
-        # Si tenemos overlay (ya es el frame BGR con los cuadrados encima), lo usamos DIRECTO.
-        # ¡Importante!: Nada de addWeighted aquí para evitar "lavar/blanquear" la imagen.
+        # Renderizado de Overlay (Visualización de depuración)
         if self._last_overlay is not None:
             try:
+                # Escalar el overlay pequeño al tamaño original del frame
                 ov = cv2.resize(
                     self._last_overlay,
                     (frame_bgr.shape[1], frame_bgr.shape[0]),
                     interpolation=cv2.INTER_LINEAR
                 )
-                frame_bgr = ov
+                frame_bgr = ov # Reemplazo directo (o superposición lógica según necesidad)
             except Exception:
                 pass
 
         return frame_bgr
 
 
-# ====================== worker (otro proceso) ======================
+# =========================================================
+# Función del Proceso Worker (Espacio de memoria separado)
+# =========================================================
 
 def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int]):
+    """
+    Punto de entrada para el proceso secundario de visión.
+    
+    Este bucle infinito se ejecuta en un núcleo separado. Consume imágenes, ejecuta
+    la lógica pesada de `run_line_auto` (en vision_line.py) y devuelve los resultados.
+    Aísla los cálculos intensivos del hilo principal del servidor web.
+    """
     try: cv2.setNumThreads(1)
     except Exception: pass
 
-    from vision_line import run_line_auto  # importa aquí (sólo en el hijo)
+    from vision_line import run_line_auto 
 
     while True:
         try:
-            # Recibir tupla (frame, ignore_colors)
+            # Espera bloqueante hasta recibir datos
             data = qin.get()
             if isinstance(data, tuple) and len(data) == 2:
                 small, ignore_colors = data
             else:
-                # Retrocompatibilidad por si solo recibe frame
                 small = data
                 ignore_colors = []
         except (EOFError, KeyboardInterrupt):
-            break
-        except Exception as e:
-            print(f"[Worker] Error recibiendo datos: {e}")
+            break # Terminación limpia
+        except Exception:
             continue
 
         try:
-            # Pasar ignore_colors a vision_line
+            # Ejecución del algoritmo de visión
             state, overlay = run_line_auto(small, draw_overlays=True, ignore_colors=ignore_colors)
         except Exception as e:
-            # Log del error para debugging
-            import traceback
-            print(f"[Worker] Error en vision_line: {e}")
-            print(f"[Worker] Traceback: {traceback.format_exc()}")
-            
+            # Fallback seguro: Retornar estado vacío/neutro en caso de error algorítmico,
+            # evitando que el proceso muera.
             h, w = small.shape[:2]
             state, overlay = ({
                 "has_list": [False]*5, "cxs":[None]*5, "errs":[None]*5, "bands":[(0,0)]*5,
@@ -325,6 +369,8 @@ def _vision_worker_main(qin: mp.Queue, qout: mp.Queue, algo_size: tuple[int, int
                 "color_list": [None]*5,
             }, None)
 
+        # Envío de resultados: Se vacía la cola de salida para asegurar que solo
+        # se emite el resultado más reciente, evitando latencia acumulada (backpressure).
         try:
             while True:
                 qout.get_nowait()

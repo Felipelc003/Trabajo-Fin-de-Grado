@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 # File name   : functions.py
-# Description : Control loop (servo dirección + motores) consumiendo visión (5 ventanas) de camera_opencv
-# Author      : Felipe (optimizado y modular)
+# Description : Bucle de control principal (dirección + tracción) basado en visión artificial.
+#               Implementa lógica PID, máquinas de estado para manejo de QR,
+#               control de velocidad adaptativo y maniobras de recuperación.
 
 import time
 import threading
@@ -9,198 +10,219 @@ import threading
 import move
 import RPIservo
 from camera_opencv import Camera
-import numpy as np  # <-- NECESARIO para np.sign
+import numpy as np  
 
 # -----------------------------
-# Constantes de dirección/marcha
+# Constantes de Actuadores y Calibración
 # -----------------------------
-SERVO_TILT = 0
-SERVO_PAN  = 1
-SERVO_STEERING = 2
+SERVO_TILT = 0     # Canal del servo de inclinación (Tilt)
+SERVO_PAN  = 1     # Canal del servo de paneo (Pan)
+SERVO_STEERING = 2 # Canal del servo de dirección
 
-# Dirección (ajusta a tu coche)
+# --- Calibración de Dirección ---
+# Valores PWM mapeados a ángulos físicos del servo de dirección.
 STEER_RIGHT        = 50
-STEER_CENTER       = 88.5   # calibra "recto" real
+STEER_CENTER       = 88.5   # Centro óptico/mecánico calibrado (ajustar si el coche deriva)
 STEER_LEFT         = 120
-K_STEER            = 0.065  # deg/px (invierte a -0.08 si gira al revés)
-KD_STEER           = 0.15  # Ganancia Derivativa
-KI_STEER           = 0.01  # Ganancia Integral
+# Ganancias del Controlador PID de Dirección
+K_STEER            = 0.065  # Proporcional: Reacción directa al error (deg/px)
+KD_STEER           = 0.15   # Derivativo: Amortiguación de oscilaciones
+KI_STEER           = 0.01   # Integral: Corrección de error estacionario
 
-# --- CONFIGURACIÓN SERVO PAN (CÁMARA) ---
-PAN_CENTER         = 85     # Ángulo central (mirando al frente)
-PAN_MAX_LEFT       = 130    # Límite físico
-PAN_MAX_RIGHT      = 40
+# --- Configuración Servo Pan (Cámara) ---
+# Seguimiento visual activo: la cámara gira en algunos casos para mantener la línea en el centro.
+PAN_CENTER         = 85     # Posición central mirando al frente
+PAN_MAX_LEFT       = 130    # Límite físico izquierdo
+PAN_MAX_RIGHT      = 40     # Límite físico derecho
 
-# --- AJUSTES DE SUAVIZADO PAN ---
-PAN_GAIN           = 0.05   # Ganancia visual (reducido de 0.05 para más suavidad)
-PAN_CENTER_FORCE   = 0.01   # Fuerza de retorno al centro
-PAN_MAX_STEP       = 6.0    # Máx grados por ciclo
-PAN_DEADBAND       = 8      # Deadband visual para la cámara
+# Dinámica del seguimiento de cámara
+PAN_GAIN           = 0.05   # Sensibilidad del movimiento de cámara al error
+PAN_CENTER_FORCE   = 0.01   # "Resorte" virtual que devuelve la cámara al centro
+PAN_MAX_STEP       = 6.0    # Máxima velocidad de giro por ciclo (grados)
+PAN_DEADBAND       = 8      # Zona muerta en píxeles para evitar 'jitter' (vibración)
 
-# Velocidades
-DRIVE_BASE_SPEED    = 60    # Velocidad base en curvas cerradas
-DRIVE_MAX_SPEED     = 65    # Velocidad en rectas (default)
-MIN_MOVE_SPEED      = 30    # vencer rozamiento
+# -----------------------------
+# Constantes de Velocidad y Tracción
+# -----------------------------
+DRIVE_BASE_SPEED    = 60    # Velocidad crucero base (0-100)
+DRIVE_MAX_SPEED     = 65    # Límite absoluto de velocidad automática
+MIN_MOVE_SPEED      = 30    # PWM mínimo necesario para vencer la fricción estática
 
-# Velocidades por color
-SPEED_BLACK_BOOST   = 80    # Recta negra a tope (Braver)
-SPEED_WHITE_NORMAL  = 50    # Normal
-SPEED_YELLOW_MAX    = 40    # Velocidad máxima amarilla
+# --- Perfiles de Velocidad según Tipo de Línea ---
+SPEED_BLACK_BOOST   = 80    # Velocidad alta para rectas negras (confianza alta)
+SPEED_WHITE_NORMAL  = 55    # Velocidad moderada para terreno blanco
+SPEED_YELLOW_MAX    = 45    # Velocidad reducida para zonas de precaución (amarillo)
 
-# Búsqueda de color
-COLOR_SEARCH_SPEED = 55     # Velocidad durante búsqueda de color
-YELLOW_CENTER_BIAS  = -5    # Desplazamiento del centro a la derecha en curvas amarillas
-RED_STOP_TIME       = 2.0   # Tiempo de parada en rojo
-RED_IGNORE_TIME     = 3.0   # Tiempo para ignorar rojo tras parar (cooldown)
+# --- Parámetros de Búsqueda y Recuperación ---
+COLOR_SEARCH_SPEED  = 55    # Velocidad durante maniobras de búsqueda de línea
+YELLOW_CENTER_BIAS  = -5    # Desplazamiento intencional para seguir el carril amarillo
+RED_STOP_TIME       = 2.0   # Tiempo de espera (s) al detectar señal de STOP (rojo)
+RED_IGNORE_TIME     = 3.0   # Tiempo de gracia (s) después de un STOP para evitar falsos positivos
 
-# Secuencias de colores
+# --- Secuencias de Navegación (Misiones) ---
+# Definen el orden esperado de colores en el circuito para navegación lógica.
 WHITE_SEQUENCE = ["white", "black"]
 YELLOW_SEQUENCE = ["yellow", "black", "yellow", "black"]
 USE_YELLOW_SEQUENCE = True
 USE_WHITE_SEQUENCE = True
 
-# Maniobras (Curvas y Reversa)
-SEARCH_TURN_SPEED      = 40   # Más fuerza al girar buscando
-SEARCH_REVERSE_SPEED   = 50   # Más fuerza marcha atrás
+# Maniobras de emergencia
+SEARCH_TURN_SPEED      = 40   # Velocidad de giro
+SEARCH_REVERSE_SPEED   = 50   # Velocidad de retroceso
 
-# Ganancia de giro específica por color
-STEER_GAIN_BLACK       = 0.15 # Antes 1/3 (~0.33). Reducido a 0.15 para suavizar
-BLACK_DEADBAND_PX      = 40   # Ignorar errores menores en recta negra
+# Ajustes específicos de dirección por color
+STEER_GAIN_BLACK       = 0.15 
+BLACK_DEADBAND_PX      = 40   # Mayor tolerancia en línea negra para evitar correcciones nerviosas
 
-# Penalización de velocidad por descentramiento en bandas bajas (2,3,4)
-BOTTOM_CENTER_SLOW_THRESH_PX = 110   # a partir de ~110 px ya recorta
-BOTTOM_CENTER_CUT_FRAC       = 0.25  # Menos frenada en curvas (Braver: 25%)
-BOTTOM_CENTER_DEADBAND_PX    = 8     # tolerancia: ignora offsets muy pequeños
+# --- Reducción de Velocidad en Curvas ---
+# El coche frena automáticamente si detecta que la línea se aleja del centro (curva cerrada)
+BOTTOM_CENTER_SLOW_THRESH_PX = 110   # Umbral de error lateral para iniciar frenado
+BOTTOM_CENTER_CUT_FRAC       = 0.10  # Porcentaje máximo de reducción de velocidad (10%)
+BOTTOM_CENTER_DEADBAND_PX    = 8     
 
-# Lógica de velocidad vs error (basada en NEAR o error mixto si NEAR falla)
-ERR_SLOW_THRESH_PX  = 100   # |err| > esto → recorta velocidad
-BLACK_SLOW_THRESH_PX = 180  # Más permisivo en recta negra (frena menos)
-ERR_STOP_THRESH_PX  = 180   # |err| > esto → casi parar (más permisivo)
+# Umbrales críticos
+ERR_SLOW_THRESH_PX  = 100   # Error para comenzar a reducir velocidad (general)
+BLACK_SLOW_THRESH_PX = 180  # Error tolerado en rectas
+ERR_STOP_THRESH_PX  = 180   # Error crítico: Posible salida de pista
 
-# Parada por pérdida de línea
-NO_LINE_STOP_FRAMES = 5
+# Seguridad
+NO_LINE_STOP_FRAMES = 5     # Número de frames sin línea antes de detenerse/buscar
 
-# Rampa y frecuencia de órdenes
-# RAMP_STEP           = 7   <-- BORRA O COMENTA ESTA LÍNEA
-RAMP_STEP_UP          = 10   # Aceleración RÁPIDA (Braver)
-RAMP_STEP_DOWN        = 10  # Frenada RÁPIDA
-RAMP_HZ_LIMIT         = 30.0  # Hz máximos de envío de órdenes al motor
+# --- Rampa de Aceleración (Soft Start/Stop) ---
+RAMP_STEP_UP          = 10   # Incremento de velocidad por ciclo
+RAMP_STEP_DOWN        = 10   # Decremento de velocidad por ciclo
+RAMP_HZ_LIMIT         = 30.0 # Tasa máxima de actualización de motores (Hz)
 
-# --- Mezcla de 5 ventanas (0=top ... 4=bottom) ---
-# Más peso a la banda inferior (near) como pediste
-WIN_WEIGHTS = [0.0, 0.0, 0.0, 0.25, 0.75]  # suma ≈ 1.0
-PRED_GAIN   = 0.15   # anticipación usando gradiente bottom-top
+# --- Ponderación de Ventanas de Visión ---
+# La imagen se divide en 5 bandas. Los pesos determinan cuánto influye cada banda en la dirección.
+# Pesos bajos arriba (lejos) y altos abajo (cerca).
+WIN_WEIGHTS = [0.02, 0.03, 0.05, 0.20, 0.70]  
+PRED_GAIN   = 0.15   # Ganancia predictiva: Usa la pendiente de la línea para anticipar curvas
 
-# --- Recortes suaves por MID/FAR (opcional) ---
+# Reducción anticipada de velocidad (Look-ahead)
 MID_ERR_SLOW_THRESH = 150
 FAR_ERR_SLOW_THRESH = 200
-CUT_MID_FRAC = 0.05  # máx 15% extra por mid
-CUT_FAR_FRAC = 0.05  # máx 15% extra por far
+CUT_MID_FRAC = 0.05  # Reducción leve si la curva empieza a media distancia
+CUT_FAR_FRAC = 0.05  # Reducción leve si la curva se ve a lo lejos
 
-# --- Pre-giro anticipado por bandas ---
-FAR_PRESTEER_DEG  = 0   # cuando SOLO far ve curva → gira ±10°
-MID_PRESTEER_DEG  = 3   # si mid también la ve → suma ±10°
-NEAR_PRESTEER_DEG = 10   # cuando near ya la ve → suma ligera (consolidación)
+# --- Pre-giro (Feed-forward) ---
+# Aplica un giro extra basado en la curvatura futura de la línea
+FAR_PRESTEER_DEG  = 0    
+MID_PRESTEER_DEG  = 3    
+NEAR_PRESTEER_DEG = 10   
 
-# --- Búsqueda activa de color ---
-COLOR_SEARCH_SPEED = 40        # Velocidad durante búsqueda de color correcto
-COLOR_SEARCH_STEER = 60        # Ángulo de giro (60 = derecha suave, 50 = máximo)
+# Búsqueda Activa (Active Search)
+COLOR_SEARCH_SPEED_ACTIVE = 40        
+COLOR_SEARCH_STEER = 60        
 
-# Limitador de velocidad de giro del servo (suaviza cambios bruscos)
-STEER_SLEW_DEG_PER_SEC = 60  # máx grados/seg que puede cambiar el servo
-STEER_SLEW_RATE_BLACK  = 100  # máx grados/seg específico para línea negra
+# Slew Rate: Limitador de velocidad del servo para movimientos más naturales
+STEER_SLEW_DEG_PER_SEC = 60   
+STEER_SLEW_RATE_BLACK  = 100  # Respuesta más rápida en carril rápido
 
-
-FRESH_TIMEOUT_SEC = 1.0   # antes 0.5; más permisivo para no perder frames
+FRESH_TIMEOUT_SEC = 1.0   # Tiempo máximo para considerar un dato de visión como válido
 
 ANY_BAND_MIN_SPEED = 38
 
-SEARCH_DEBOUNCE_FRAMES = 3      # nº de frames buenos para soltar latch
-NEAR_EDGE_THRESH_PX    = 100    # opcional: exigir que se perdió estando "en el borde"
-SEARCH_FORWARD_TIMEOUT_S   = 5.0  # Tiempo para la búsqueda hacia adelante
+SEARCH_DEBOUNCE_FRAMES = 3      # Frames consecutivos necesarios para confirmar recuperación de línea
+NEAR_EDGE_THRESH_PX    = 100    # Umbral de borde para activar latch de búsqueda
+SEARCH_FORWARD_TIMEOUT_S   = 5.0 # Tiempo máximo intentando buscar hacia adelante antes de retroceder
 
-# --- Constantes para la maniobra de reversa ---
-SEARCH_REACQUIRE_CENTER_PX = 40   # Umbral (en píxeles) para considerar la línea "centrada"
+# Constantes para maniobra de reversa
+SEARCH_REACQUIRE_CENTER_PX = 40   
 
-# Pesos de fallback near/mid/far (si no podemos mezclar 5)
+# Pesos de respaldo (si falla la mezcla de ponderada)
 NEAR_W, MID_W, FAR_W     = 0.70, 0.20, 0.10
 
-# --- Suavizado del error ---
-ERR_EMA_ALPHA     = 0.50   # 0..1 (más alto = responde más rápido)
-ERR_EMA_ALPHA_BLACK = 0.15 # Muy bajo para suavizar recta negra
-ERR_DEADBAND_PX   = 6      # ignora errores pequeños ±6 px
-TANH_SCALE_PX     = 140    # compresión suave en saturaciones (opcional)
-USE_TANH_SHAPING  = True   # activa compresión no lineal del error
+# --- Filtrado de Señal de Error ---
+ERR_EMA_ALPHA     = 0.50   # Factor de suavizado (Exponential Moving Average)
+ERR_EMA_ALPHA_BLACK = 0.15 # Suavizado más agresivo en rectas
+ERR_DEADBAND_PX   = 6      # Ruido a ignorar
+TANH_SCALE_PX     = 140    # Escala para la función de modelado no lineal (tanh)
+USE_TANH_SHAPING  = True   # Activa respuesta no lineal (más suave al centro, saturada en extremos)
 
 
 class Functions(threading.Thread):
     """
-    Hilo de CONTROL: consume el estado de línea publicado por camera_opencv (modo 'trackLine')
-    y gobierna servo de dirección + motores con rampa.
+    Hilo de CONTROL PRINCIPAL (Control Loop).
+    
+    Orquesta la percepción y la acción:
+    1. Recibe el estado del entorno procesado por `cv_processor`.
+    2. Ejecuta lógica de alto nivel (Misiones, QR, Recuperación).
+    3. Calcula comandos de bajo nivel (PID Dirección, Perfiles Velocidad).
+    4. Envía órdenes a los actuadores (Servos y Motores DC).
     """
 
     def __init__(self, *args, **kwargs):
+        """Inicialización de variables de estado y controladores."""
         super(Functions, self).__init__(*args, **kwargs)
 
-        # Estado de modo/ejecución
+        # Estado de modo de operación
         self.functionMode = 'none'
 
-        # Estado del seguidor (control)
+        # Variables de control de tracción
         self.line_follow_active = False
-        self._target_speed = 0
-        self._current_speed = 0
-        self._no_line_frames = 0
+        self._target_speed = 0        # Velocidad deseada
+        self._current_speed = 0       # Velocidad actual (para rampa)
+        self._no_line_frames = 0      # Contador de pérdida de señal visual
         self._last_drive_time = 0.0
-        self._line_last_seq = None
+        self._line_last_seq = None    # Sincronización con thread de visión
         self._last_debug_log = 0.0
-        self._ignore_red_until = 0.0 # Cooldown para no parar en bucle
+        self._ignore_red_until = 0.0  # Temporizador inercial tras STOP
 
+        # Estado del servo de cámara (Pan)
         self._pan_angle = float(PAN_CENTER)
         self._pan_active = False
 
-        # Evento para pausar/reanudar el bucle del hilo
+        # Sincronización de hilos (Pause/Resume)
         self.__flag = threading.Event()
         self.__flag.clear()
 
+        # Estado del servo de dirección
         self._servo_last_angle = STEER_CENTER
         self._servo_last_time  = time.time()
 
-        # -------- Estado para el latch de búsqueda --------
-        self.last_near_err  = None       # último err_near válido
-        self.last_near_side = None       # 'left' | 'right' | None
+        # --- Variables Latch para Recuperación ---
+        # "Latch" memoriza el último estado válido conocido para saber hacia dónde girar
+        # si se pierde la línea.
+        self.last_near_err  = None       
+        self.last_near_side = None       
         self.last_near_color = None
-        self.search_latch   = None       # 'left' | 'right' | None
-        self.search_debounce = 0         # frames de mejora hacia el centro
+        self.search_latch   = None       # Estado actual de la maniobra de búsqueda
+        self.search_debounce = 0         
 
-        self._err_ema = None   # último error filtrado para la mezcla
+        self._err_ema = None   # Estado del filtro EMA
 
-        # --- ESTADO PID ---
+        # Estado del controlador PID
         self._pid_last_err = 0.0
         self._pid_integral = 0.0
         self._pid_last_time = time.time()
 
-        # Estado de secuencia de colores (LEGACY - mantenido por compatibilidad)
-        self.white_sequence_index = 0  # Índice para secuencia blanca
-        self.yellow_sequence_index = 0  # Índice para secuencia amarilla
-        self.target_color = None  # Se establece al detectar el primer color
-        self.active_sequence = None  # 'white' o 'yellow', indica cuál secuencia está activa
+        # Estado de secuencia de colores (Lógica de Misión)
+        self.white_sequence_index = 0  
+        self.yellow_sequence_index = 0  
+        self.target_color = None  
+        self.active_sequence = None  
         
-        # Estado QR - Sistema nuevo de lectura de códigos QR
-        self.qr_initial_color = None    # 'yellow' o 'white' del QR
-        self.qr_mode = None              # 'A' (alternado) o 'U' (único)
-        self.qr_cycles_total = 0         # N del QR
-        self.qr_cycles_done = 0          # Contador de pasos completados
-        self.qr_current_color = None     # Color actual a seguir
-        self.qr_needs_read = True        # Flag para saber si necesita leer QR
+        # Sistema de lectura de códigos QR
+        self.qr_initial_color = None    
+        self.qr_mode = None              
+        self.qr_cycles_total = 0         
+        self.qr_cycles_done = 0          
+        self.qr_current_color = None     
+        self.qr_needs_read = True        
         
-        # Búsqueda activa de color (cuando ve color incorrecto)
-        self.color_search_mode = False   # ¿Está buscando el color correcto?
-        self.color_search_target = None  # Color que está buscando ('yellow'/'white')
-        self.color_search_direction = None  # Dirección de búsqueda ('left'/'right')
-        self.color_search_forced = False  # Búsqueda forzada (no se desactiva automáticamente)
-        self.color_search_frames = 0      # Contador de frames en búsqueda forzada
+        # Estado de búsqueda activa de color (Post-QR)
+        self.color_search_mode = False   
+        self.color_search_target = None  
+        self.color_search_direction = None  
+        self.color_search_forced = False  
+        self.color_search_frames = 0      
 
-        # Motores listos
+        # Variables para BARRIDO DE CÁMARA (Visual Sweep)
+        self.sweep_start_time = 0.0
+        self.sweep_direction = 1 # 1=Right, -1=Left 
+
+        # Inicialización de hardware (Posición segura)
         try:
             RPIservo.move(SERVO_PAN, int(self._pan_angle))
             RPIservo.move(SERVO_TILT, 40)
@@ -211,37 +233,43 @@ class Functions(threading.Thread):
             if hasattr(move, "setup"):
                 move.setup()
         except Exception as e:
-            print("[Functions] Aviso: move.setup() falló:", e)
+            print("[Functions] Error en inicialización de motores:", e)
 
-    # --------------- Helpers de movimiento ---------------
+    # ---------------------------------------------------------
+    # Métodos Auxiliares de Movimiento y Control
+    # ---------------------------------------------------------
 
     def _update_pan_servo(self, error_px):
         """
-        Mueve la cámara persiguiendo el error visual con FUERZA DE RETORNO SUAVE.
-        Devuelve el offset en grados desde el centro.
+        Sistema de "Mirada Activa" (Active Gaze).
+        
+        Controla el servo Pan para mantener la línea centrada en la imagen, independiente
+        del chasis del robot. Ayuda a no perder la línea en curvas cerradas.
+        
+        Retorna:
+            El offset angular aplicado (útil para sumar a la dirección).
         """
         if error_px is None:
-            # Si no hay línea o no queremos seguirla, volver al centro lentamente
+            # Retorno elástico al centro si no hay referencia visual
             center_delta = (PAN_CENTER - self._pan_angle) * 0.1
             self._pan_angle += center_delta
         else:
-            # 1. Calcular fuerza visual
+            # Corrección Proporcional basada en el error visual
             vision_delta = 0
             if abs(float(error_px)) > PAN_DEADBAND:
-                # Error Positivo (Izq) -> Delta Positivo (Aumentar ángulo hacia Izq)
                 vision_delta = float(error_px) * PAN_GAIN 
 
-            # 2. Calcular fuerza de retorno (Elasticidad)
+            # Fuerza de centrado (para evitar que la cámara se quede girada permanentemente)
             center_delta = (PAN_CENTER - self._pan_angle) * PAN_CENTER_FORCE
             
-            # 3. Sumar fuerzas y limitar (Slew Rate)
+            # Limitador de velocidad (Slew Rate Limiter) para movimiento suave
             total_delta = vision_delta + center_delta
             if total_delta > PAN_MAX_STEP: total_delta = PAN_MAX_STEP
             elif total_delta < -PAN_MAX_STEP: total_delta = -PAN_MAX_STEP
 
             self._pan_angle += total_delta
 
-        # Clamp y aplicar
+        # Saturación a límites mecánicos
         self._pan_angle = max(PAN_MAX_RIGHT, min(PAN_MAX_LEFT, self._pan_angle))
         
         try:
@@ -252,6 +280,7 @@ class Functions(threading.Thread):
         return (self._pan_angle - PAN_CENTER)
 
     def _motor_stop(self):
+        """Detiene los motores DC inmediatamente."""
         try:
             if hasattr(move, "motorStop"):
                 move.motorStop()
@@ -262,50 +291,52 @@ class Functions(threading.Thread):
         self._current_speed = 0
 
     def _set_target_speed(self, spd: int):
+        """Establece la consigna de velocidad objetivo."""
         spd = int(max(0, min(100, spd)))
         self._target_speed = spd
 
     def _ramp_and_drive(self):
+        """
+        Controlador de Potencia de Motores con Rampa de Aceleración.
+        
+        Suaviza la aceleración y frenado para:
+        1. Evitar picos de corriente que reinicien la Raspberry Pi.
+        2. Reducir el deslizamiento de las ruedas (tracción mecánica).
+        3. Proporcionar un movimiento más suave.
+        """
         now = time.time()
+        # Limitador de frecuencia de actualización
         if now - self._last_drive_time < 1.0 / RAMP_HZ_LIMIT:
             return
         self._last_drive_time = now
 
+        # Lógica de Rampa
         if self._current_speed < self._target_speed:
-            # ESTAMOS ACELERANDO
-            
-            # 1. Si estamos por debajo de la mínima (o parados), saltamos a la mínima
+            # Aceleración
             if self._current_speed < MIN_MOVE_SPEED:
-                self._current_speed = MIN_MOVE_SPEED
-            
-            # 2. Si ya nos movemos, subimos suavemente (Rampa Lenta)
+                self._current_speed = MIN_MOVE_SPEED # Kick-start
             else:
                 self._current_speed = min(self._current_speed + RAMP_STEP_UP, self._target_speed)
         
         elif self._current_speed > self._target_speed:
-            # ESTAMOS FRENANDO: Usamos paso grande (Rampa Rápida)
+            # Frenado
             self._current_speed = max(self._current_speed - RAMP_STEP_DOWN, self._target_speed)
 
-        # --- APLICAR AL MOTOR ---
+        # Aplicación al hardware
         v = int(self._current_speed)
-        print(f"[Functions] Velocidad actual: {v:3d} | Velocidad objetivo: {self._target_speed:3d}", end='\r', flush=True)
+        print(f"[Functions] Vel: {v:3d} | Objetivo: {self._target_speed:3d}", end='\r', flush=True)
 
-        # Si la velocidad es muy baja (menor que la mínima para moverse) y el target es 0, paramos.
-        # (Mantenemos un pequeño margen para no cortar en seco si estamos frenando suave)
         if (not self.line_follow_active) or (v < MIN_MOVE_SPEED and self._target_speed == 0):
             self._motor_stop()
             return
 
         try:
             move.forward(v)
-        except Exception as e:
+        except Exception:
             self._motor_stop()
 
     def _steer_from_err(self, err_px: int):
-        """
-        Mapea error de píxeles (izq:+ / der:-) a ángulo de servo.
-        'shim' de compatibilidad: simple, fiable y rápido.
-        """
+        """Convierte error visual (px) directamente a ángulo de servo (deg) [Modo Simple]."""
         target = int(STEER_CENTER + K_STEER * int(err_px))
         target = max(STEER_RIGHT, min(STEER_LEFT, target))
         try:
@@ -316,22 +347,21 @@ class Functions(threading.Thread):
 
     def _steer_command(self, target_deg: int, slew_rate=STEER_SLEW_DEG_PER_SEC):
         """
-        Aplica un limitador de pendiente (slew-rate) al servo para que no gire
-        más rápido de slew_rate. Devuelve el ángulo realmente enviado.
+        Envía comando al servo de dirección con limitación de velocidad (Slew Rate).
+        Evita movimientos bruscos que puedan desestabilizar el vehículo.
         """
         now = time.time()
         dt = max(1e-3, now - self._servo_last_time)
         max_step = slew_rate * dt
 
-        # clamp a los límites físicos
+        # Saturación física
         target_deg = max(STEER_RIGHT, min(STEER_LEFT, int(target_deg)))
 
-        # aplicar slew
+        # Limitación de paso
         delta = target_deg - self._servo_last_angle
         if abs(delta) > max_step:
             target_deg = int(self._servo_last_angle + max_step * (1 if delta > 0 else -1))
 
-        # enviar al servo
         try:
             RPIservo.move(SERVO_STEERING, target_deg)
         except Exception:
@@ -343,85 +373,70 @@ class Functions(threading.Thread):
 
     def _filter_mix_err(self, err, alpha=ERR_EMA_ALPHA):
         """
-        Aplica deadband, EMA y compresión suave (tanh) al error combinado.
+        Preprocesamiento avanzado de la señal de error para el PID.
+        Pipeline: Deadband -> Filtro Paso Bajo (EMA) -> Conformado No Lineal (Tanh).
         """
         if err is None:
             return None
 
-        # Deadband: elimina micro-oscilaciones
+        # 1. Zona muerta: Ignorar pequeños errores
         if abs(err) < ERR_DEADBAND_PX:
             err = 0.0
 
-        # EMA (suavizado exponencial)
+        # 2. Filtro EMA (Media Móvil Exponencial) para reducir ruido
         if self._err_ema is None:
             self._err_ema = float(err)
         else:
             self._err_ema = (1.0 - alpha) * self._err_ema + alpha * float(err)
         e = self._err_ema
 
-        # Compresión no lineal (evita órdenes extremas de golpe)
+        # 3. Función de transferencia no lineal (Tanh)
+        # Permite alta sensibilidad en el centro y satura suavemente en los extremos
         if USE_TANH_SHAPING and TANH_SCALE_PX > 1:
             e = TANH_SCALE_PX * np.tanh(e / float(TANH_SCALE_PX))
 
         return e
 
-
-
-    # --------------- API de modos (llamadas desde webServer/GUI) ---------------
+    # ---------------------------------------------------------
+    # Gestión de Modos y Estados
+    # ---------------------------------------------------------
 
     def pause(self):
-        """
-        Detiene de forma segura cualquier modo activo:
-        - Para motores y congela rampas.
-        - Centra la dirección (si hay servo).
-        - Desactiva overlays / modos de cámara.
-        - Pone el hilo de funciones en pausa.
-        """
+        """Transición a estado seguro: Motores OFF, Servos centrados."""
         self.functionMode = 'none'
         self.line_follow_active = False
 
-        # Parar motores (con rampa si está disponible)
         try:
             self._set_target_speed(0)
             self._ramp_and_drive()
         except Exception:
             try:
-                if hasattr(move, "motorStop"):
-                    move.motorStop()
-                else:
-                    move.stop()
-            except Exception:
-                pass
+                if hasattr(move, "motorStop"): move.motorStop()
+                else: move.stop()
+            except Exception: pass
 
         self._target_speed = 0
         self._current_speed = 0
         self._no_line_frames = 0
         self._line_last_seq = None
 
-        # Centrar la dirección
-        try:
-            RPIservo.move(SERVO_STEERING, STEER_CENTER)
-        except Exception:
-            pass
+        try: RPIservo.move(SERVO_STEERING, STEER_CENTER)
+        except Exception: pass
 
-        # Quitar overlays / modos de cámara
         try:
+            # Desactiva procesamiento de visión para ahorrar CPU
             cam = Camera.get_instance()
             cam.modeselect('none')
-        except Exception:
-            pass
+        except Exception: pass
 
-        # Pausar hilo
-        try:
-            self.__flag.clear()
-        except Exception:
-            pass
+        try: self.__flag.clear()
+        except Exception: pass
 
-        print("Pausa: motores OFF, cámara en 'none', dirección centrada.")
+        print("[Functions] Sistema pausado.")
 
     def modeSet(self, mode: str):
-        # Unifica Automatic y trackLine al mismo flujo por cámara
-        if mode in ('trackLine', 'Automatic', 'automatic'):
+        """Selector principal de modo de operación."""
+        if mode == 'trackLine':
             self.trackLine()
         elif mode == 'none':
             self.pause()
@@ -429,40 +444,30 @@ class Functions(threading.Thread):
             print(f"[Functions] Modo desconocido: {mode}")
 
     def resume(self):
+        """Libera el bloqueo del thread principal."""
         self.__flag.set()
 
     def trackLine(self):
         """
-        Seguir línea con cámara:
-        - La cámara publica métricas (5 ventanas) en cv_thread.line_state (modo 'trackLine').
-        - Este hilo controla servo + motores en base a dichas métricas.
+        Inicializa y arranca el modo de Seguidor de Línea.
+        Resetea todos los controladores y estados internos para un arranque limpio.
         """
-        # Seguridad básica
         try:
-            if hasattr(move, "motorStop"):
-                move.motorStop()
-            else:
-                move.stop()
-        except Exception:
-            pass
-        try:
-            RPIservo.move(SERVO_STEERING, STEER_CENTER)
-        except Exception:
-            pass
+            if hasattr(move, "motorStop"): move.motorStop()
+            else: move.stop()
+        except Exception: pass
+        
+        try: RPIservo.move(SERVO_STEERING, STEER_CENTER)
+        except Exception: pass
 
-        # Activar visión
         try:
             cam = Camera.get_instance()
             cam.modeselect('trackLine')
-            print("[trackLine] Cámara en 'trackLine'. Control en functions.py")
+            print("[trackLine] Visión activada.")
         except Exception as e:
-            print(f"[trackLine] No se pudo activar trackLine: {e}")
+            print(f"[trackLine] Error al activar visión: {e}")
 
-        # ═══════════════════════════════════════════════════════════
-        # RESET COMPLETO DE ESTADOS - Inicio limpio
-        # ═══════════════════════════════════════════════════════════
-        
-        # Estado de control básico
+        # Reinicio de variables de control
         self._target_speed = 0
         self._current_speed = 0
         self._no_line_frames = 0
@@ -471,7 +476,7 @@ class Functions(threading.Thread):
         self.line_follow_active = True
         self._ignore_red_until = 0.0
 
-        # Estados de búsqueda (latch)
+        # Reinicio de variables de búsqueda (Latch)
         self.last_near_err = None
         self.last_near_side = None
         self.last_near_color = None
@@ -479,7 +484,7 @@ class Functions(threading.Thread):
         self.search_debounce = 0
         self._err_ema = None
         
-        # Estados QR
+        # Reinicio estado QR
         self.qr_initial_color = None
         self.qr_mode = None
         self.qr_cycles_total = 0
@@ -487,51 +492,56 @@ class Functions(threading.Thread):
         self.qr_current_color = None
         self.qr_needs_read = True
         
-        # Estados de búsqueda activa de color
+        # Reinicio búsqueda activa
         self.color_search_mode = False
         self.color_search_target = None
         self.color_search_direction = None
         self.color_search_forced = False
         self.color_search_frames = 0
         
-        # Estados legacy (secuencias)
+        # Reinicio Secuencias de color
         self.white_sequence_index = 0
         self.yellow_sequence_index = 0
         self.target_color = None
         self.active_sequence = None
         
-        # Estados PID
+        # Reinicio PID
         self._pid_last_err = 0.0
         self._pid_integral = 0.0
         self._pid_last_time = time.time()
         
-        print("[trackLine] ✓ Todos los estados reiniciados - Inicio limpio")
-
         self.functionMode = 'trackLine'
         self.resume()
 
-        # Pequeña tolerancia inicial: espera a la PRIMERA medición fresca
+        # Espera activa para estabilización de la cámara y primeros frames válidos
         try:
             cvp = Camera.get_instance().cv_thread
             t0 = time.time()
-            while time.time() - t0 < 0.5:  # hasta 0.5s de margen
+            while time.time() - t0 < 0.5:
+                # Polling rápido para vaciar buffers viejos
                 st, seq = cvp.get_line_state(wait_new=True, last_seq=None, timeout=0.2)
                 if (time.time() - st.get('timestamp', 0)) < FRESH_TIMEOUT_SEC:
                     break
         except Exception:
             pass
 
-
-    # --------------- Lazo de control (se llama periódicamente desde run) ---------------
+    # ---------------------------------------------------------
+    # Bucle Principal de Control (Llamado desde run)
+    # ---------------------------------------------------------
 
     def trackLineProcessing(self):
         """
-        Dirección = mezcla ponderada de 5 ventanas + anticipación + pre-giro por bandas.
-        Velocidad = avanza SIEMPRE que al menos una banda vea línea.
-        Con latch de búsqueda: si se pierde NEAR, gira hacia el último lado visto
-        hasta que NEAR reaparezca y su |error| empiece a bajar.
+        CICLO DE CONTROL CRÍTICO:
+        Ejecuta la lógica de conducción autónoma en tiempo real.
+        
+        Etapas:
+        1. Adquisición de Datos: Obtiene geometría de líneas y colores desde `cv_processor`.
+        2. Gestión de Misión (QR): Decide qué color seguir y cuándo detenerse.
+        3. Recuperación: Detecta si se perdió la línea e inicia maniobras de búsqueda.
+        4. Navegación (Steering): Calcula el ángulo de giro usando PID ponderado y Feed-forward.
+        5. Tracción (Throttle): Ajusta la velocidad según la curvatura y condiciones de seguridad.
         """
-        # 1) Productor (cámara)
+        # 1. Adquisición de instancia de cámara
         try:
             cam = Camera.get_instance()
             cvp = cam.cv_thread
@@ -539,143 +549,109 @@ class Functions(threading.Thread):
             time.sleep(0.1)
             return
 
-        # 2) Esperar medición NUEVA
+        # 2. Sincronización bloqueante con el siguiente frame de visión
+        # Evita ejecutar el lazo PID más rápido que la cámara (ahorro de CPU)
         st, seq = cvp.get_line_state(wait_new=True, last_seq=self._line_last_seq, timeout=0.25)
         self._line_last_seq = seq
 
-        # 3) Datos
+        # 3. Desempaquetado de datos del entorno
         now = time.time()
         fresh = (now - st.get('timestamp', 0)) < FRESH_TIMEOUT_SEC
 
-        errs = st.get('errs')        # lista 5 (0=top..4=bottom)
-        hasl = st.get('has_list')    # lista booleana 5
-        en   = st.get('err_near', st.get('err', None))
-        em   = st.get('err_mid',  None)
-        ef   = st.get('err_far',  None)
+        errs = st.get('errs')        # Lista de errores desde arriba (0) hacia abajo (4)
+        hasl = st.get('has_list')    # Banderas booleanas si se detectó línea en esa banda
+        en   = st.get('err_near', st.get('err', None)) # Error cercano (fundamental para control)
+        em   = st.get('err_mid',  None) # Error medio (anticipación)
+        ef   = st.get('err_far',  None) # Error lejano (anticipación)
         hn   = st.get('has_near', en is not None)
         hm   = st.get('has_mid',  em is not None)
         hf   = st.get('has_far',  ef is not None)
 
-
-
-
         color_list = st.get('color_list', [None]*5)
-        
-        # --- Detectar color RAW (sin filtrar) de la banda más cercana ---
         raw_band_color = color_list[4] if (hasl and hasl[4]) else None
         
-        # ═══════════════════════════════════════════════════════════
-        # SISTEMA QR: Filtrado de colores competidores
-        # ═══════════════════════════════════════════════════════════
+        # -------------------------------------------------------
+        # Filtrado Lógico de Colores (QR / Misiones)
+        # -------------------------------------------------------
         if self.qr_current_color is not None and not self.qr_needs_read:
-            # Sistema QR activo - filtrar colores según instrucción QR
+            # Si tenemos una misión activa (ej. QR ordena seguir AMARILLO):
+            # Filtramos todos los detecciones que NO sean de ese color.
             
-            # Debug: Estado pre-filtro
             active_before = [(i, color_list[i]) for i in range(len(hasl)) if hasl[i]]
-            # print(f"[Debug PRE-filtro] QR_color={self.qr_current_color}, Bandas: {active_before}")
             
             filtered_hasl = list(hasl) if hasl else [False]*5
-            filtered_errs = list(errs) if errs else [None]*5  # ← TAMBIÉN COPIAR ERRORES
+            filtered_errs = list(errs) if errs else [None]*5
             filtered_count = 0
             
             for i in range(len(filtered_hasl)):
                 if filtered_hasl[i]:
                     band_color = color_list[i]
                     
-                    # Si QR dice seguir AMARILLO, ignorar BLANCO
+                    # Máscara de exclusión lógica
                     if self.qr_current_color == 'yellow':
                         if band_color == 'white':
                             filtered_hasl[i] = False
-                            filtered_errs[i] = None  # ← LIMPIAR ERROR
+                            filtered_errs[i] = None
                             filtered_count += 1
-                            print(f"[QR Filtro] Banda {i}: Ignorando BLANCO (sigo AMARILLO)")
-                    
-                    # Si QR dice seguir BLANCO, ignorar AMARILLO
                     elif self.qr_current_color == 'white':
                         if band_color == 'yellow':
                             filtered_hasl[i] = False
-                            filtered_errs[i] = None  # ← LIMPIAR ERROR
+                            filtered_errs[i] = None
                             filtered_count += 1
-                            print(f"[QR Filtro] Banda {i}: Ignorando AMARILLO (sigo BLANCO)")
             
             hasl = filtered_hasl
-            errs = filtered_errs  # ← APLICAR ERRORES FILTRADOS
+            errs = filtered_errs
             
-            # Debug: Estado post-filtro
-            active_after = [(i, color_list[i]) for i in range(len(hasl)) if hasl[i]]
-            # print(f"[Debug POST-filtro] Filtradas={filtered_count}, Bandas: {active_after}")
-            
-            # ═══════════════════════════════════════════════════════════
-            # BÚSQUEDA ACTIVA: Detectar si solo ve color incorrecto
-            # ═══════════════════════════════════════════════════════════
+            # --- Detección de pérdida de camino correcto ---
             any_correct_color = any(hasl)
             
             if not any_correct_color and self.qr_current_color is not None:
-                # No ve el color correcto después del filtro
+                # No vemos el color correcto, ¿Vemos el color incorrecto? (ej. cruce o bifurcación)
                 wrong_color = 'white' if self.qr_current_color == 'yellow' else 'yellow'
                 
-                # Verificar si ve el color incorrecto (usando hasl ORIGINAL antes del filtro)
                 sees_wrong_color = any(color_list[i] == wrong_color for i in range(len(active_before)) 
                                       if i < len(filtered_hasl))
                 
                 if sees_wrong_color:
-                    # Activar búsqueda
+                    # Si vemos el color incorrecto, activamos el modo de BÚSQUEDA DEL COLOR CORRECTO
                     if not self.color_search_mode:
-                        print(f"[Color Search] ⚠ Ve {wrong_color.upper()} pero necesita {self.qr_current_color.upper()}")
-                        print(f"[Color Search] → Iniciando búsqueda hacia la DERECHA")
+                        print(f"[Color Search] Detectado {wrong_color.upper()}, buscando {self.qr_current_color.upper()}")
                         self.color_search_mode = True
                         self.color_search_target = self.qr_current_color
             else:
-                # Ve el color correcto DESPUES del filtro
+                # Recuperación: Si volvemos a ver el color correcto, desactivamos búsqueda
                 if self.color_search_mode:
-                    # Si es búsqueda forzada, requerir detección real en BANDA CRUDA
                     if self.color_search_forced:
-                        # Incrementar contador
                         self.color_search_frames += 1
-                        
-                        # Verificar si realmente ve el color en las bandas CRUDAS (raw_band_color)
                         if raw_band_color == self.color_search_target:
-                            print(f"[Color Search FORCED] ✓ Color {self.color_search_target.upper()} detectado en banda RAW!")
-                            self.color_search_mode = False
-                            self.color_search_target = None
-                            self.color_search_direction = None  # Limpiar dirección
-                            self.color_search_forced = False
-                            self.color_search_frames = 0
-                        elif self.color_search_frames > 50:  # Máximo 50 frames buscando
-                            print(f"[Color Search FORCED] ✗ Timeout - desactivando búsqueda forzada")
                             self.color_search_mode = False
                             self.color_search_target = None
                             self.color_search_direction = None
                             self.color_search_forced = False
                             self.color_search_frames = 0
-                        else:
-                            print(f"[Color Search FORCED] Buscando... ({self.color_search_frames}/50 frames)")
+                        elif self.color_search_frames > 50: # Timeout de búsqueda
+                            self.color_search_mode = False
+                            self.color_search_frames = 0
                     else:
-                        # Búsqueda normal (no forzada)
-                        print(f"[Color Search] ✓ Color {self.color_search_target.upper()} encontrado!")
                         self.color_search_mode = False
                         self.color_search_target = None
-                        self.color_search_direction = None  # Limpiar dirección
+                        self.color_search_direction = None
                         self.color_search_forced = False
                         self.color_search_frames = 0
         
-        # ═══════════════════════════════════════════════════════════
-        # SISTEMA LEGACY: Filtrado de colores (mantenido por compatibilidad)
-        # ═══════════════════════════════════════════════════════════
+        # -------------------------------------------------------
+        # Lógica de Secuencias Predefinidas (Fallback sin QR)
+        # -------------------------------------------------------
         elif self.target_color is not None and (USE_WHITE_SEQUENCE or USE_YELLOW_SEQUENCE):
-            # Sistema legacy activo (solo si QR no está activo)
-            # --- PASO 1: Activar secuencia solo UNA VEZ al inicio ---
             if self.active_sequence is None and raw_band_color in ['white', 'yellow']:
                 if raw_band_color == 'white' and USE_WHITE_SEQUENCE:
                     self.active_sequence = 'white'
                     self.target_color = WHITE_SEQUENCE[0]
-                    print(f"[Secuencia Legacy] Iniciando secuencia BLANCA: {WHITE_SEQUENCE}")
                 elif raw_band_color == 'yellow' and USE_YELLOW_SEQUENCE:
                     self.active_sequence = 'yellow'
                     self.target_color = YELLOW_SEQUENCE[0]
-                    print(f"[Secuencia Legacy] Iniciando secuencia AMARILLA: {YELLOW_SEQUENCE}")
             
-            # --- PASO 2: Aplicar filtro de colores competidores ---
+            # Filtrado similar al modo QR
             filtered_hasl = list(hasl) if hasl else [False]*5
             for i in range(len(filtered_hasl)):
                 if filtered_hasl[i]:
@@ -683,165 +659,156 @@ class Functions(threading.Thread):
                     if self.active_sequence == 'white' and self.target_color == 'white':
                         if band_color == 'yellow':
                             filtered_hasl[i] = False
-                            if i == 4:
-                                print(f"[Filtro Legacy] Ignorando AMARILLO (sigo BLANCO)")
                     elif self.active_sequence == 'yellow' and self.target_color == 'yellow':
                         if band_color == 'white':
-                            RPIservo.move(SERVO_PAN, PAN_MAX_RIGHT)
+                            RPIservo.move(SERVO_PAN, 70) # Ayuda visual
                             filtered_hasl[i] = False
-                            if i == 4:
-                                print(f"[Filtro Legacy] Ignorando BLANCO (sigo AMARILLO)")
-                                RPIservo.move(SERVO_PAN, PAN_MAX_RIGHT)
-
             hasl = filtered_hasl
         
-        # --- Calcular current_band_color DESPUÉS del filtro ---
-        # Esto determina el color que realmente está siguiendo
         current_band_color = color_list[4] if (hasl and hasl[4]) else None
-        
-        # Debug: mostrar color actual
-        # if current_band_color is not None:
-            # print(f"[Color actual] {current_band_color}")
-
         any_band = isinstance(hasl, list) and any(hasl)
 
-        # Variables de la SEGUNDA banda más cercana (índice 3)
+        # Variables de banda auxiliar (índice 3) para robustez
         en3 = errs[3] if (isinstance(errs, list) and len(errs) > 3) else None
         hn3 = hasl[3] if (isinstance(hasl, list) and len(hasl) > 3) else False
         color3 = color_list[3] if (isinstance(color_list, list) and len(color_list) > 3) else None
 
-        # 3.a) Actualizar "último lado" visto por la BANDA 3 (antes NEAR)
-        # Recordatorio: err = center_x - cx  → err>0 => línea a la IZQUIERDA (cx a la izquierda)
+        # Actualización de memoria de última posición conocida (Latch)
         if hn3 and en3 is not None:
             self.last_near_side = 'left' if float(en3) > 0 else 'right'
-            self.last_near_err  = float(en3)  # asegura que se actualiza
+            self.last_near_err  = float(en3) 
             self.last_near_color = color3
 
-        # 3.b) Lógica de LATCH de búsqueda (Base: BANDA 3)
-        # Activa latch sólo cuando NO hay BANDA 3 y la última vez estaba en el BORDE
+        # -------------------------------------------------------
+        # Lógica de Recuperación (State Machine)
+        # -------------------------------------------------------
         if (self.search_latch is None) and (self.last_near_side in ('left', 'right')):
             cond_perdida = (not hn3) or (not any_band)
             if cond_perdida:
-                # Eliminamos la condición del "borde" (NEAR_EDGE_THRESH_PX)
+                # Si se pierde la línea, decidimos la maniobra basada en el último dato
                 if (self.last_near_err is None) or (abs(self.last_near_err) >= NEAR_EDGE_THRESH_PX):
                     if self.last_near_color == 'yellow':
                         self.search_latch = 'search_forward_right'
                     elif self.last_near_side == 'left':
+                         # Si la línea se fue por la izquierda, giramos izquierda buscándola
                         self.search_latch = 'search_forward_left'
                     else:
                         self.search_latch = 'search_forward_right'
 
                     self.search_debounce = 0
-                    self.search_started_t = now  # para límite de tiempo
+                    self.search_started_t = now
 
-        # 3.c) Lógica de LATCH (TRANSICIÓN Y SALIDA - Base BANDA 3)
+        # Ejecución de la máquina de estados de recuperación
         if self.search_latch is not None:
             
-            # Condición de SALIDA (Línea centrada en BANDA 3)
+            # Condición de ÉXITO: recuperamos la línea centrada
             if hn3 and en3 is not None and (abs(float(en3)) < SEARCH_REACQUIRE_CENTER_PX):
                 self.search_debounce += 1
                 if self.search_debounce >= SEARCH_DEBOUNCE_FRAMES:
-                    self.search_latch = None  # ¡LATCH SUELTO! (Sale de la búsqueda)
+                    self.search_latch = None 
                     self.search_debounce = 0
-                    self._motor_stop() # Paramos motores inmediatamente
+                    self._motor_stop() # Breve parada para estabilizar
                     
-            # Condición de TRANSICIÓN (Timeout Etapa 1 -> Etapa 2)
+            # Timeout de búsqueda frontal -> Pasar a búsqueda en REVERSA
             elif self.search_latch in ('search_forward_left', 'search_forward_right'):
-
                 timeout_limit = SEARCH_FORWARD_TIMEOUT_S
-                if self.last_near_color == 'yellow':
-                    #timeout_limit = 12.0 # 12s de búsqueda si era amarilla
-                    pass
-                else:
-                    timeout_limit = SEARCH_FORWARD_TIMEOUT_S
-
-                    if (now - self.search_started_t) > timeout_limit:
-                        # Se acabó el tiempo, pasa a Etapa 2 (Reversa)
-                        if self.search_latch == 'search_forward_left':
-                            self.search_latch = 'search_reverse_left'
-                        else:
-                            self.search_latch = 'search_reverse_right'
-                        
-                        # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
-                        # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
-                        if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
-                            if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
-                                self.white_sequence_index += 1
-                                self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
-                                print(f"[Secuencia BLANCA] Cambiando a color: {self.target_color}")
-                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
-                        elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
-                            if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
-                                self.yellow_sequence_index += 1
-                                self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
-                                print(f"[Secuencia AMARILLA] Cambiando a color: {self.target_color}")
-                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
-                        
-                        # --- TRANSICIÓN DE COLOR EN LA SECUENCIA ---
-                        # Cuando se agota el tiempo buscando el color actual, avanzar al siguiente
-                        if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
-                            if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
-                                self.white_sequence_index += 1
-                                self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
-                                print(f"[Secuencia BLANCA] Cambiando a color: {self.target_color}")
-                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
-                        elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
-                            if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
-                                self.yellow_sequence_index += 1
-                                self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
-                                print(f"[Secuencia AMARILLA] Cambiando a color: {self.target_color}")
-                                self.search_latch = None  # Reiniciar búsqueda para el nuevo color
-                                
-                # Si vemos la línea pero no está centrada, reseteamos debounce
-                if hn3:
-                    self.search_debounce = 0
+                if (now - self.search_started_t) > timeout_limit:
+                    if self.search_latch == 'search_forward_left':
+                        self.search_latch = 'search_reverse_left'
+                    else:
+                        self.search_latch = 'search_reverse_right'
                     
-            # Si estamos buscando (en cualquier etapa) y no vemos la línea
+                    # Avance forzado de secuencia si aplica
+                    if self.active_sequence == 'white' and USE_WHITE_SEQUENCE:
+                        if self.white_sequence_index < len(WHITE_SEQUENCE) - 1:
+                            self.white_sequence_index += 1
+                            self.target_color = WHITE_SEQUENCE[self.white_sequence_index]
+                            self.search_latch = None
+                    elif self.active_sequence == 'yellow' and USE_YELLOW_SEQUENCE:
+                        if self.yellow_sequence_index < len(YELLOW_SEQUENCE) - 1:
+                            self.yellow_sequence_index += 1
+                            self.target_color = YELLOW_SEQUENCE[self.yellow_sequence_index]
+                            self.search_latch = None
+                                
             elif not hn3:
                 self.search_debounce = 0
 
-        # 4) Dirección base
+            # Lógica Específica de BARRIDO DE CÁMARA
+            if self.search_latch == 'search_sweep':
+                # Si hemos encontrado cualquier indicio de línea (any_band), intentamos centrar y salir
+                if any_band:
+                   # Dejar que el PID y Active Gaze hagan su trabajo
+                   self.search_latch = None
+                   self._motor_stop()
+                   return
+
+                # Ejecución del movimiento de barrido (Ping-Pong)
+                # Oscila entre PAN_MAX_LEFT (130) y PAN_MAX_RIGHT (40)
+                sweep_speed = 3.0 # Rad/s
+                dt_sweep = now - self.sweep_start_time
+                
+                # Timeout del barrido: Si tarda mucho, pasamos a MARCHA ATRÁS
+                if dt_sweep > 4.0: # 4 segundos de búsqueda
+                    print("[Sweep] Barrido fallido. Iniciando retroceso.")
+                    self.search_latch = 'search_reverse_smart'
+                    # Centrar cámara para retroceder
+                    RPIservo.move(SERVO_PAN, PAN_CENTER)
+                    self.sweep_start_time = now # Reusamos timer para el reverso
+                else:
+                    # Movimiento Sinusoidal para suavidad
+                    # Centro 85, amplitud 45 -> [40, 130]
+                    amplitude = 45
+                    angle = PAN_CENTER + amplitude * np.sin(sweep_speed * dt_sweep)
+                    try:
+                        RPIservo.move(SERVO_PAN, int(angle))
+                    except: pass
+
+            # Timeout para Reverse Smart
+            elif self.search_latch == 'search_reverse_smart':
+                if (now - self.sweep_start_time) > 2.0: # 2 segundos de marcha atrás
+                     # Si falla, volvemos a intentar barrido o paramos?
+                     # Paramos para no irnos al infinito
+                     print("[Recovery] Recuperación fallida total.")
+                     self.search_latch = None
+                     self._motor_stop()
+
+        # -------------------------------------------------------
+        # 4. Cálculo de Dirección (Steering)
+        # -------------------------------------------------------
         servo_base = None
         mix_err = None
 
-        # 4.a) Si está en modo búsqueda de color → giro fijo según dirección configurada
         if self.color_search_mode:
-            # Determinar dirección de giro según configuración
+            # Modo búsqueda de color activa: forzar giro
             if self.color_search_direction == 'right':
                 servo_cmd = STEER_RIGHT
-                dir_str = "DERECHA"
             elif self.color_search_direction == 'left':
                 servo_cmd = STEER_LEFT
-                dir_str = "IZQUIERDA"
             else:
-                # Default a derecha si no hay dirección configurada
                 servo_cmd = STEER_RIGHT
-                dir_str = "DERECHA (default)"
             
-            self._set_target_speed(COLOR_SEARCH_SPEED)  # Velocidad lenta
+            self._set_target_speed(COLOR_SEARCH_SPEED)
             servo_pos = self._steer_command(servo_cmd)
-            print(f"[Color Search] Buscando {self.color_search_target.upper()} → girando {dir_str}")
 
-        # 4.b) Si hay latch activo → giro fijo hacia ese lado (skip mezcla y pre-giro)
         elif self.search_latch is not None:
-
-           # Etapa 1: Búsqueda ADELANTE (Gira HACIA el lado perdido)
+           # Modo recuperación: giro predefinido según estado
             if self.search_latch == 'search_forward_right':
                 servo_cmd = STEER_RIGHT
             elif self.search_latch == 'search_forward_left':
                 servo_cmd = STEER_LEFT
-                
-            # Etapa 2: Búsqueda REVERSA (Gira OPUESTO al lado perdido)
             elif self.search_latch == 'search_reverse_right':
-                servo_cmd = STEER_LEFT
+                servo_cmd = STEER_LEFT  # Invertido al retroceder
             elif self.search_latch == 'search_reverse_left':
-                servo_cmd = STEER_RIGHT
+                servo_cmd = STEER_RIGHT # Invertido al retroceder
+            else:
+                servo_cmd = STEER_CENTER
+
                 
             servo_pos = self._steer_command(servo_cmd)
         else:
-
-            # 4.b) Dirección por mezcla de 5 ventanas con pesos WIN_WEIGHTS
+            # Modo Seguimiento Normal: PID Ponderado
             if isinstance(errs, list) and isinstance(hasl, list) and len(errs) == len(hasl) == 5 and any_band:
+                # Calcular error promedio ponderado
                 acc = 0.0; wsum = 0.0
                 for i, e in enumerate(errs):
                     if e is not None and hasl[i]:
@@ -849,13 +816,13 @@ class Functions(threading.Thread):
                         wsum += WIN_WEIGHTS[i]
                 if wsum > 0:
                     mix_err = acc / wsum
-                    # anticipación: diferencia bottom-top (4 - 0)
+                    # Término D predictivo espacial (Gradiente visual)
                     e_top    = float(errs[0]) if (hasl[0] and errs[0] is not None) else mix_err
                     e_bottom = float(errs[4]) if (hasl[4] and errs[4] is not None) else mix_err
                     grad = e_bottom - e_top
                     mix_err = mix_err + PRED_GAIN * grad
                     
-                    # Usar alpha suave si estamos en negro
+                    # Filtrado temporal
                     alpha_use = ERR_EMA_ALPHA_BLACK if (current_band_color == 'black') else ERR_EMA_ALPHA
                     mix_err = self._filter_mix_err(mix_err, alpha=alpha_use)
 
@@ -865,62 +832,51 @@ class Functions(threading.Thread):
                 now = time.time()
                 dt = max(1e-3, now - self._pid_last_time)
 
-                # --- LÓGICA PID ---
-                error = float(mix_err) # Error P
+                # --- CONTROLADOR PID ---
+                error = float(mix_err) # Proporcional
 
                 if current_band_color == 'black' and abs(error) < BLACK_DEADBAND_PX:
-                    error = 0.0
+                    error = 0.0 # Zona muerta específica
 
-                # Término I (con "anti-windup": si no hay línea, resetea)
+                # Integral (con limitador Anti-windup)
                 if not any_band:
                     self._pid_integral = 0.0
                 else:
                     self._pid_integral += error * dt
-                    self._pid_integral = max(-100.0, min(100.0, self._pid_integral)) # Límite
+                    self._pid_integral = max(-100.0, min(100.0, self._pid_integral))
 
-                # Término D
+                # Derivativo (dError/dt)
                 derivative = (error - self._pid_last_err) / dt
 
-                # Guardar para la próxima
                 self._pid_last_err = error
                 self._pid_last_time = now
 
-                # Cálculo final de dirección
-                kd_use = KD_STEER
-                ki_use = KI_STEER
-                pid_out = (K_STEER * error) + (ki_use * self._pid_integral) + (kd_use * derivative)
+                # Salida del PID
+                pid_out = (K_STEER * error) + (KI_STEER * self._pid_integral) + (KD_STEER * derivative)
 
-                # --- LÓGICA DE MOVIMIENTO DE CÁMARA (ACTIVE GAZE) ---
+                # Active Gaze: Mover cámara en curvas cerradas
                 pan_offset = 0
                 if current_band_color == 'yellow':
-                    # Persigue la línea amarilla
                     pan_offset = self._update_pan_servo(mix_err)
                     if pan_offset >= 75: pan_offset = 75
                 elif current_band_color == 'white':
-                    # Persigue la línea blanca 
                     pan_offset = self._update_pan_servo(mix_err)
                 else:
-                    # Vuelve al centro para negro/otros
-                    self._update_pan_servo(None)
+                    self._update_pan_servo(None) # Centrar cámara
                     pan_offset = 0
 
-                # --- CÁLCULO FINAL DE DIRECCIÓN ---
+                # Aplicación de salida
                 if current_band_color == 'black':
                     servo_base = int(STEER_CENTER + pid_out)
-                    if servo_base >= 91.5:
-                        servo_base = 91.5
-                    elif servo_base <= 85.5:
-                        servo_base = 85.5
+                    # Limitación suave para alta velocidad
+                    servo_base = max(85.5, min(91.5, servo_base))
                 if current_band_color == 'yellow' or current_band_color == 'white':
-                    # Active Gaze: Dirección = Centro + OffsetCámara + PID
-                    # Copiamos el giro de la cámara + corrección fina
+                    # Compensación de Pan en curvas lentas
                     servo_base = int(STEER_CENTER + pan_offset + pid_out)
-                    
                 else:
-                    # Lógica estándar
                     servo_base = int(STEER_CENTER + pid_out)
 
-            # 4.c) PRE-GIRO escalonado por bandas (empieza con FAR)
+            # Pre-giro (Feed-forward) basado en visión lejana
             pre_bias = 0
             if hf and ef is not None:
                 pre_bias += int(np.sign(float(ef)) * FAR_PRESTEER_DEG)
@@ -933,42 +889,38 @@ class Functions(threading.Thread):
                 servo_base = STEER_CENTER
 
             servo_cmd = max(STEER_RIGHT, min(STEER_LEFT, servo_base + pre_bias))
+            
+            # Ajuste de velocidad del servo según urgencia
             rate_use = STEER_SLEW_RATE_BLACK if (current_band_color == 'black') else STEER_SLEW_DEG_PER_SEC
             servo_pos = self._steer_command(servo_cmd, slew_rate=rate_use)
 
-        # 5) Velocidad
-        # A) PARADA EN ROJO CON SISTEMA QR
+        # -------------------------------------------------------
+        # 5. Control de Velocidad (Throttle)
+        # -------------------------------------------------------
+        
+        # Detección de STOP (Línea roja) y gestión de Misión QR
         if current_band_color == 'red' and self.search_latch is None and (time.time() > self._ignore_red_until):
             
-            # CASO 1: Necesita leer QR (no hay orden activa)
+            # Caso A: Se requiere lectura de un QR
             if self.qr_needs_read:
-                print("[QR] ══════ ROJO DETECTADO - LEYENDO QR ══════")
+                print("[QR] Deteniendo para escaneo de código...")
                 self._motor_stop()
                 
-                # PAUSAR procesamiento de bandas
-                try:
+                try: # Pausar visión principal
                     cam = Camera.get_instance()
                     cvp = cam.cv_thread
-                    cvp.pause()  # ← PAUSAR BANDAS
-                except Exception as e:
-                    print(f"[QR] Error pausando bandas: {e}")
+                    cvp.pause() 
+                except Exception: pass
                     
-                # Mover cámara a posición de escaneo
+                # Posicionamiento de cámara para leer QR
                 try:
-                    RPIservo.move(SERVO_TILT, 90)
+                    RPIservo.move(SERVO_TILT, 90) # Mirar arriba
                     RPIservo.move(SERVO_PAN, 85)
-                except Exception as e:
-                    print(f"[QR] Error moviendo servos: {e}")
-                    
-                # Iniciar escaneo QR
-                try:
-                    cvp.start_qr_scan()
-                except Exception as e:
-                    print(f"[QR] Error iniciando QR scan: {e}")
+                    cvp.start_qr_scan() # Iniciar hilo scanner
+                except Exception: pass
 
-                # Esperar a que se lea el QR
-                print("[QR] Esperando lectura de QR...")
-                qr_timeout = 60.0  # Timeout de 60 segundos
+                # Espera bloqueante hasta leer código o timeout
+                qr_timeout = 60.0
                 qr_start_time = time.time()
                 qr_found = False
                 
@@ -976,29 +928,19 @@ class Functions(threading.Thread):
                     try:
                         st, seq = cvp.get_line_state(wait_new=False)
                         if st.get('qr_valid', False):
-                            # QR válido leído
                             color = st.get('qr_color')
                             mode = st.get('qr_mode')
                             cycles = st.get('qr_cycles')
                             qr_found = True
-                            print(f"[QR] ✓ QR recibido de CVProcessor: {color}, {mode}, {cycles}")
+                            print(f"[QR] Datos recibidos: Color={color}, Modo={mode}, Ciclos={cycles}")
                             break
-                    except Exception as e:
-                        print(f"[QR] Error leyendo line_state: {e}")
-                    
+                    except Exception: pass
                     time.sleep(0.1)
                 
+                try: cvp.stop_qr_scan()
+                except: pass
                 
-                if not qr_found:
-                    print("[Functions] No se ha detectado nigún QR")
-            
-                # Detener escaneo
-                try:
-                    cvp.stop_qr_scan()
-                except:
-                    pass
-                
-                # Inicializar estado QR
+                # Configuración de la nueva misión
                 self.qr_initial_color = color
                 self.qr_mode = mode
                 self.qr_cycles_total = cycles
@@ -1006,180 +948,123 @@ class Functions(threading.Thread):
                 self.qr_current_color = color
                 self.qr_needs_read = False
                 
-                print(f"[QR] ══════ ORDEN RECIBIDA ══════")
-                print(f"[QR] Color inicial: {color}")
-                print(f"[QR] Modo: {'ALTERNADO' if mode == 'A' else 'ÚNICO'}")
-                print(f"[QR] Ciclos: {cycles}")
-                print(f"[QR] ════════════════════════════")
-                print(f"[QR Debug] qr_current_color = '{self.qr_current_color}'")
-                print(f"[QR Debug] qr_needs_read = {self.qr_needs_read}")
                 
-                # ═══════════════════════════════════════════════════════════
-                # ACTIVAR BÚSQUEDA FORZADA DEL COLOR CON DIRECCIÓN
-                # ═══════════════════════════════════════════════════════════
+                # Configuración de búsqueda forzada para encontrar el nuevo color objetivo
                 self.color_search_mode = True
                 self.color_search_target = color
-                self.color_search_forced = True  # Marcar como búsqueda FORZADA
-                self.color_search_frames = 0      # Inicializar contador
+                self.color_search_forced = True
+                self.color_search_frames = 0
                 
-                # Configurar dirección según color esperado
-                # GEOMETRÍA DEL CIRCUITO: Amarillo→DERECHA, Blanco→IZQUIERDA
+                # Orientación inicial heurística según el color objetivo
                 if color == 'white':
-                    self.color_search_direction = 'left'  # Blanco está a la IZQUIERDA
+                    self.color_search_direction = 'left' 
                     RPIservo.move(SERVO_PAN, 100)
-                    print("[QR] 🔍 Activando búsqueda FORZADA de BLANCO → girando IZQUIERDA")
-                    # Desactivar detección de amarillo en vision_line
-                    try:
-                        cvp.set_ignore_colors(['yellow'])
-                        print("[QR] 🚫 Desactivando detección de AMARILLO en vision")
-                    except:
-                        pass
+                    try: cvp.set_ignore_colors(['yellow'])
+                    except: pass
                 elif color == 'yellow':
-                    self.color_search_direction = 'right'   # Amarillo está a la DERECHA
+                    self.color_search_direction = 'right'
                     RPIservo.move(SERVO_PAN, 70)
-                    print("[QR] 🔍 Activando búsqueda FORZADA de AMARILLO → girando DERECHA")
-                    # Desactivar detección de blanco en vision_line
-                    try:
-                        cvp.set_ignore_colors(['white'])
-                        print("[QR] 🚫 Desactivando detección de BLANCO en vision")
-                    except:
-                        pass
+                    try: cvp.set_ignore_colors(['white'])
+                    except: pass
                 else:
-                    self.color_search_direction = 'left'  # Default izquierda
-                    print(f"[QR] 🔍 Activando búsqueda FORZADA de {color.upper()} → default IZQUIERDA")
-                    try:
-                        cvp.set_ignore_colors([])
-                    except:
-                        pass
+                    self.color_search_direction = 'left'
+                    try: cvp.set_ignore_colors([])
+                    except: pass
                 
-                # REANUDAR procesamiento de bandas
-                try:
-                    cvp.resume()
-                    print("[QR] Bandas reanudadas")
-                except Exception as e:
-                    print(f"[QR] Error reanudando bandas: {e}")
+                try: cvp.resume()
+                except: pass
 
-
-                # Restaurar cámara a posición normal
+                # Restauración de actuadores para conducción
                 try:
                     RPIservo.move(SERVO_TILT, 40)
                     RPIservo.move(SERVO_PAN, 85)
                     RPIservo.move(SERVO_STEERING, 88.5)
-                    print("[QR] Cámara restaurada a posición normal")
-                except Exception as e:
-                    print(f"[QR] Error restaurando cámara: {e}")
+                except: pass
                 
-                # Limpiar el QR válido del estado
+                # Limpiar flag de lectura
                 try:
                     with cvp._line_lock:
                         cvp._line_state['qr_valid'] = False
-                except:
-                    pass
+                except: pass
                 
-                # Esperar antes de continuar
-                time.sleep(RED_STOP_TIME)
+                time.sleep(RED_STOP_TIME) # Espera semafórica
                 
-                # Continuar con velocidad normal
                 self._set_target_speed(50)
                 self._ramp_and_drive()
                 self._ignore_red_until = time.time() + RED_IGNORE_TIME
-                print(f"[QR] Continuando por línea {self.qr_current_color.upper()}")
                 return
                 
-            # CASO 2: Ejecutando orden activa (pasa sin parar)
+            # Caso B: Si ya tenemos misión, contamos ciclos (vueltas/paradas)
             else:
-                print(f"[QR] ROJO detectado - Ciclo {self.qr_cycles_done + 1}")
-                
-                # Incrementar contador
                 self.qr_cycles_done += 1
                 
-                # Modo Único (U)
+                # Lógica Modo Único
                 if self.qr_mode == 'U':
                     if self.qr_cycles_done >= self.qr_cycles_total:
-                        # Orden completada
-                        self.qr_needs_read = True
-                        print(f"[QR] ✓ Orden ÚNICA completada ({self.qr_cycles_total} ciclos)")
-                        #print(f"[QR] Próximo rojo leerá nuevo QR")
+                        self.qr_needs_read = True # Misión cumplida, esperar nuevo QR
+                        print("[QR] Misión completada.")
                         self._motor_stop()
                         return
                     else:
-                        # Continuar con el mismo color
-                        print(f"[QR] Modo ÚNICO: Continúa con {self.qr_current_color.upper()}")
-                        print(f"[QR] Progreso: {self.qr_cycles_done}/{self.qr_cycles_total}")
-
-                        # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
                         self._ignore_red_until = time.time() + RED_IGNORE_TIME
-                        
-                        # NO PARAR - continuar inmediatamente
-                        print(f"[QR] Pasando por rojo sin detenerse...")
                         return
                 
-                # Modo Alternado (A)
+                # Lógica Modo Alternado (Cambio de carril cada parada)
                 elif self.qr_mode == 'A':
-                    total_stops = self.qr_cycles_total * 2  # Cada ciclo tiene 2 paradas
+                    total_stops = self.qr_cycles_total * 2
                     
                     if self.qr_cycles_done >= total_stops:
-                        # Orden completada
                         self.qr_needs_read = True
-                        print(f"[QR] ✓ Orden ALTERNADA completada ({self.qr_cycles_total} ciclos = {total_stops} paradas)")
-                        # print(f"[QR] Próximo rojo leerá nuevo QR")
                         self._motor_stop()
                         return
                     else:
-                        # Alternar color
+                        # Cambio de color objetivo (Toggle)
                         if self.qr_current_color == 'yellow':
                             self.qr_current_color = 'white'
                         else:
                             self.qr_current_color = 'yellow'
                         
-                        print(f"[QR] Modo ALTERNADO: Cambia a {self.qr_current_color.upper()}")
-                        print(f"[QR] Progreso: {self.qr_cycles_done}/{total_stops} paradas")
-                        
-                        # Actualizar colores a ignorar en vision
                         try:
                             cam = Camera.get_instance()
                             cvp = cam.cv_thread
                             if self.qr_current_color == 'white':
                                 cvp.set_ignore_colors(['yellow'])
-                                print("[QR] 🚫 Desactivando detección de AMARILLO en vision")
                             elif self.qr_current_color == 'yellow':
                                 cvp.set_ignore_colors(['white'])
-                                print("[QR] 🚫 Desactivando detección de BLANCO en vision")
-                        except Exception as e:
-                            print(f"[QR] Error actualizando ignore_colors: {e}")
+                        except Exception: pass
                 
-                        # Ignorar este rojo por un tiempo para no detectarlo múltiples veces
                         self._ignore_red_until = time.time() + RED_IGNORE_TIME
-                        
-                        # NO PARAR - continuar inmediatamente
-                        print(f"[QR] Pasando por rojo sin detenerse...")
                         return
 
-
+        # Aplicación de velocidad según estado de Navegación
         if self.search_latch is not None:
-            # --- MODO BÚSQUEDA ---
+            # Velocidad reducida durante recuperación
             if self.search_latch in ('search_forward_right', 'search_forward_left'):
                 if self.last_near_color == 'yellow':
                     self._set_target_speed(SPEED_YELLOW_MAX)
                 else:
-                    self._set_target_speed(SEARCH_TURN_SPEED) # 40
+                    self._set_target_speed(SEARCH_TURN_SPEED) 
                 self._ramp_and_drive()
+            
+            elif self.search_latch == 'search_sweep':
+                # Durante el barrido, mantenemos los motores detenidos
+                self._motor_stop()
+            
             elif self.last_near_color == 'red' and self.qr_current_color == 'white':
                 try:
                     RPIservo.move(SERVO_PAN, PAN_MAX_LEFT)
                 except Exception:
                     pass
+            
             else:
-                try: # REVERSA FUERTE
-                    move.backward(SEARCH_REVERSE_SPEED) # 38
+                # Reverso (search_reverse_left/right/smart)
+                try: 
+                    move.backward(SEARCH_REVERSE_SPEED) 
                     self._current_speed = -SEARCH_REVERSE_SPEED
                 except Exception: self._motor_stop()
 
         elif self.line_follow_active and fresh and any_band:
-            # --- MODO NORMAL ---
-            
-            # Selección de velocidad MAX según color
-            # Selección de velocidad MAX: Prioridad a AMARILLO (frenar si se ve en CUALQUIER ventana)
+            # Conducción Normal: Determinar velocidad base
             is_yellow_any = False
             is_white_any = False
             if isinstance(color_list, list) and isinstance(hasl, list) and len(color_list) == len(hasl):
@@ -1190,27 +1075,31 @@ class Functions(threading.Thread):
             
             target_max = DRIVE_MAX_SPEED
             
+            # Prioridad de reducción de velocidad
             if is_yellow_any:
-                target_max = SPEED_YELLOW_MAX # 45 - Prioridad absoluta: si veo amarillo, freno
+                target_max = SPEED_YELLOW_MAX # Precaución
                 if self._current_speed > target_max:
                     self._current_speed = float(target_max)
-
             elif is_white_any:
-                target_max = SPEED_WHITE_NORMAL # 50
+                target_max = SPEED_WHITE_NORMAL
             elif current_band_color == 'black':
-                target_max = SPEED_BLACK_BOOST # 70 - Solo si NO hay amarillo/blanco y estoy en negro
+                target_max = SPEED_BLACK_BOOST
 
+            # Cálculo de frenado inteligente en curvas
             ref_err = float(en) if (hn and en) else (float(mix_err) if mix_err else 0.0)
             abs_ref = abs(ref_err)
             
             if abs_ref >= ERR_STOP_THRESH_PX:
-                base = max(0, int(DRIVE_BASE_SPEED * 0.2))
+                # Curva muy crítica: Velocidad mínima
+                base = max(0, int(DRIVE_BASE_SPEED * 0.5))
             else:
+                # Interpolación lineal de velocidad basada en error
                 thresh_use = BLACK_SLOW_THRESH_PX if (current_band_color == 'black') else ERR_SLOW_THRESH_PX
                 k = max(0.0, min(1.0, abs_ref / float(thresh_use)))
                 base = int(DRIVE_BASE_SPEED + (target_max - DRIVE_BASE_SPEED) * (1.0 - k))
                 base = max(base, MIN_MOVE_SPEED)
 
+            # Reducciones adicionales predictivas
             cut_mid = cut_far = 0
             if hm and em is not None:
                 k_mid = max(0.0, min(1.0, abs(float(em)) / float(MID_ERR_SLOW_THRESH)))
@@ -1219,9 +1108,11 @@ class Functions(threading.Thread):
                 k_far = max(0.0, min(1.0, abs(float(ef)) / float(FAR_ERR_SLOW_THRESH)))
                 cut_far = int(CUT_FAR_FRAC * (DRIVE_MAX_SPEED - MIN_MOVE_SPEED) * k_far)
 
+            # Reducción por descentramiento acumulado
             errs_abs = []
-            if isinstance(errs, list) and isinstance(hasl, list) and len(errs) >= 5 and len(hasl) >= 5: # Asume 5 o 10 bandas
-                num_bands_to_check = len(errs) // 2 # Chequea la mitad inferior
+            if isinstance(errs, list) and len(errs) >= 5:
+                # Verificar desviaciones en la mitad inferior de la imagen
+                num_bands_to_check = len(errs) // 2 
                 start_index = len(errs) - num_bands_to_check
                 for i in range(start_index, len(errs)):
                     if hasl[i] and errs[i] is not None:
@@ -1242,35 +1133,31 @@ class Functions(threading.Thread):
             
             self._no_line_frames = 0
             self._set_target_speed(int(max(MIN_MOVE_SPEED, desired)))
-            # move.forward(self._target_speed)
-            self._ramp_and_drive() # ¡Aquí SÍ usamos la rampa!
+            self._ramp_and_drive() 
 
         else:
-            # --- MODO PARADA (Sin línea Y sin búsqueda) ---
+            # Parada de Seguridad por pérdida de señal sostenida
             self._no_line_frames += 1
             if self._no_line_frames >= NO_LINE_STOP_FRAMES:
-                self._set_target_speed(50)
-                move.forward(self._target_speed)
-                # self._ramp_and_drive() 
+                self._motor_stop()
+                
+                # Si no estamos ya en una maniobra, iniciamos BARRIDO
+                #Pendiente de prueba
+                if self.search_latch is None:
+                    print("[Lost] Línea perdida. Iniciando barrido visual...")
+                    self.search_latch = 'search_sweep'
+                    self.sweep_start_time = time.time()
 
-        # 6) Memorias para próxima iteración
-
-        try:
-            cam = Camera.get_instance()
-            cvp = cam.cv_thread
-        except Exception:
-            pass
-
-
-    # --------------- Bucle del hilo ---------------
+    # ---------------------------------------------------------
+    # Ejecución del Thread
+    # ---------------------------------------------------------
 
     def functionGoing(self):
         if self.functionMode == 'trackLine':
             self.trackLineProcessing()
-        # (otros modos en el futuro)
 
     def run(self):
         while True:
-            self.__flag.wait()          # espera a que haya algún modo activo
+            self.__flag.wait()   # Espera hasta resume()       
             if self.functionMode != 'none':
                 self.functionGoing()
