@@ -1,387 +1,335 @@
 #!/usr/bin/env python3
 # File name   : webServer.py
-# Description : WebSocket server para controlar PiCar-B (1 motor + servo dirección)
-# Autor: Adeept | Adaptado para TFG (RobotLight API actual + move.py canal A)
+# Description : Servidor Principal del Sistema.
+#               Integra múltiples servicios Concurrentes:
+#               1. Servidor WebSocket (Puerto 8888): Control remoto en tiempo real y telemetría.
+#               2. Servidor Flask (Puerto 5000): Streaming de video HTTP.
+#               3. Lógica de Hardware: Coordinación de motores, servos y sensores.
 
 import os
-import sys
-import time
-import threading
 import asyncio
 import websockets
 import json
 import socket
-from camera_opencv import Camera
-import move
-import RPIservo
-import functions
-import robotLight
-import app
+import threading
 
-# =================== Estado global ===================
-speed_set = 70
-direction_command = 'no'
-turn_command = 'no'
+# Módulos del robot
+from camera_opencv import Camera  # Sistema de cámara
+import move                       # Control de motores DC
+import RPIservo                   # Control de servos (PCA9685)
+import functions                  # Lógica autónoma (PID, Line Following)
+import robotLight                 # Control de iluminación RGB
+import app                        # Instancia de aplicación Flask
 
-# Servo IDs (según tu PCA9685)
-SERVO_TILT = 0
-SERVO_PAN = 1
-SERVO_STEERING = 2
+# =================== Estado global del Sistema ===================
+speed_set = 70             # Velocidad por defecto (0-100)
+direction_command = 'no'   # Estado actual de dirección
+turn_command = 'no'        # Estado actual de giro
 
-# =================== Luces ===================
-try:
-    RL = robotLight.RobotLight()
-    RL.start()  # hilo de efectos (breath, police, rainbow...)
-except Exception as e:
-    RL = None
-    print(f"[robotLight] No disponible: {e}")
+# Identificadores de canales de Servo
+SERVO_TILT = 0     # Servo de inclinación vertical de cámara
+SERVO_PAN  = 1     # Servo de paneo horizontal de cámara
+SERVO_STEERING = 2 # Servo de dirección del vehículo
 
-# =================== Hilo de funciones (radar, automático, sigue-líneas) ===================
-fuc = functions.Functions()
-fuc.start()
+# Instancias Globales de Controladores
+RL = None   # Controlador de Luces
+fuc = None  # Controlador de Funciones Autónomas
 
-# === Helper para compatibilidad de modos de cámara (nuevo/antiguo) ===
-def camera_mode(mode: str):
-    """
-    Puente de compatibilidad:
-      - Si la nueva cámara tiene enable_line_black(), úsala.
-      - Si tu cámara antigua tiene modeselect(), úsala como fallback.
-    """
-    try:
-        cam = Camera.get_instance()
-        # nueva API
-        if hasattr(cam, "enable_line_black"):
-            if mode in ("trackLine"):
-                cam.enable_line_black(True)
-            elif mode in ("none", "pause", "stop"):
-                cam.enable_line_black(False)
-            else:
-                # otros modos que lleve tu app (findColor/watchDog) viven en app.flask_app
-                pass
-        # legacy (por si sigue existiendo en alguna rama)
-        elif hasattr(cam, "modeselect"):
-            cam.modeselect(mode)
-    except Exception as e:
-        print(f"[camera_mode] No se pudo cambiar modo '{mode}': {e}")
-
-# =================== Utilidades ===================
-def servoPosInit():
-    """Centra dirección, pan y tilt."""
-    RPIservo.move(SERVO_STEERING, 88.5)
-    RPIservo.move(SERVO_TILT, 40)
-    RPIservo.move(SERVO_PAN, 85)
-
-def wifi_check():
-    """
-    Señaliza estado de red con RobotLight:
-    - Conectado: frontal verde + traseros verde
-    - AP: frontal azul + traseros azul
-    """
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1.5)
-        s.connect(("1.1.1.1", 80))
-        s.close()
-        print("Wi-Fi conectado.")
-        if RL:
-            RL.front_color('green')           # delanteros en verde
-            RL.rear_set_color(0, 255, 255)      # traseros verde
-            # efecto suave opcional en traseros:
-            RL.breath(0.0, 1.0, 0.0)          # verde respirando
-    except Exception:
-        print("No hay Wi-Fi, creando AP...")
-        if RL:
-            RL.front_color('blue')            # delanteros en azul
-            RL.rear_set_color(0, 0, 255)      # traseros azul
-            RL.breath(0.0, 0.0, 1.0)          # azul respirando
-        os.system("sudo create_ap wlan0 eth0 Adeept_Robot &")
-
+# =================== Utilidades de Sistema (Optimizado) ===================
+# Variables estáticas para cálculo diferencial de uso de CPU
 _prev_cpu_total = None
 _prev_cpu_idle  = None
 
 def _read_cpu_times():
     """
-    Lee /proc/stat y devuelve (total, idle) como enteros.
-    total = suma de todos los campos
-    idle  = idle + iowait
+    Lee las estadísticas crudas del kernel desde /proc/stat.
+    Optimización: Evita usar comandos externos como 'top' que son lentos y pesados.
+    
+    Retorna:
+    - total: Tiempo total de CPU acumulado.
+    - idle: Tiempo ocioso acumulado (idle + iowait).
     """
-    with open("/proc/stat", "r") as f:
-        first = f.readline()
-    if not first.startswith("cpu "):
-        return None, None
-    parts = first.split()[1:]
-    vals = list(map(int, parts[:10]))  # user nice system idle iowait irq softirq steal guest guest_nice
-    user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice = vals + [0]*(10-len(vals))
-    idle_all = idle + iowait
-    total = sum(vals)
-    return total, idle_all
+    try:
+        with open("/proc/stat", "r") as f:
+            line = f.readline()
+            if not line.startswith("cpu "): return None, None
+            parts = list(map(int, line.split()[1:11]))
+            # idle incluye idle normal + iowait (espera de disco)
+            idle_all = parts[3] + parts[4] 
+            total = sum(parts)
+            return total, idle_all
+    except: return None, None
 
-def read_cpu_usage_percent():
+def get_cpu_usage():
     """
-    Devuelve el % de CPU usado (0-100) calculado con delta entre lecturas.
-    En la primera llamada hace una doble lectura rápida.
+    Calcula el porcentaje de uso de CPU en tiempo real.
+    Compara los contadores de ciclos entre dos llamadas consecutivas.
     """
     global _prev_cpu_total, _prev_cpu_idle
-    t1, i1 = _read_cpu_times()
-    if t1 is None:
-        return 0.0
+    t_now, i_now = _read_cpu_times()
+    
+    if t_now is None: return "0"
+    
+    # Primera lectura: no hay referencia anterior
+    if _prev_cpu_total is None:
+        _prev_cpu_total, _prev_cpu_idle = t_now, i_now
+        return "0" 
+    
+    delta_total = t_now - _prev_cpu_total
+    delta_idle  = i_now - _prev_cpu_idle
+    
+    # Actualizar estado previo
+    _prev_cpu_total, _prev_cpu_idle = t_now, i_now
+    
+    if delta_total == 0: return "0"
+    usage = 100.0 * (1.0 - (delta_idle / delta_total))
+    return f"{usage:.1f}"
 
-    # Primera vez: esperar un instante y medir de nuevo
-    if _prev_cpu_total is None or _prev_cpu_idle is None:
-        time.sleep(0.2)
-        t2, i2 = _read_cpu_times()
-        if t2 is None:
-            return 0.0
-        _prev_cpu_total, _prev_cpu_idle = t2, i2
-        dt, di = (t2 - t1), (i2 - i1)
-    else:
-        dt, di = (t1 - _prev_cpu_total), (i1 - _prev_cpu_idle)
-        _prev_cpu_total, _prev_cpu_idle = t1, i1
-
-    if dt <= 0:
-        return 0.0
-    # uso = (tiempo activo / total) * 100 = (dt - di) / dt
-    usage = (dt - di) * 100.0 / dt
-    return max(0.0, min(100.0, round(usage, 1)))
-
-def read_cpu_temp_c():
-    """
-    Devuelve temperatura CPU en ºC (float). Usa thermal_zone0 y fallback vcgencmd.
-    """
-    # thermal_zone0 (típico en RPi OS)
+def get_cpu_temp():
+    """Obtiene la temperatura del SoC leyendo la zona térmica del sistema."""
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            raw = f.readline().strip()
-        val = float(raw) / 1000.0
-        return round(val, 2)
-    except Exception:
-        pass
+            return round(float(f.read()) / 1000, 2)
+    except: return 0.0
 
-    # vcgencmd (si firmware/paquete disponible)
+def get_ram_usage():
+    """Calcula el porcentaje de memoria RAM utilizada leyendo /proc/meminfo."""
     try:
-        out = subprocess.check_output(["/usr/bin/vcgencmd", "measure_temp"], text=True).strip()
-        # formato: temp=48.0'C
-        if "temp=" in out:
-            s = out.split("temp=")[1]
-            s = s.split("'")[0]
-            return round(float(s), 2)
+        mem = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split(':')
+                if len(parts) == 2:
+                    mem[parts[0].strip()] = int(parts[1].split()[0])
+        
+        total = mem.get('MemTotal', 1)
+        avail = mem.get('MemAvailable', mem.get('MemFree', 0))
+        used_percent = 100 * (1 - (avail / total))
+        return f"{used_percent:.1f}"
+    except: return "0"
+
+def wifi_check():
+    """
+    Verificación de conectividad de red al inicio.
+    - Si hay internet (ping a 1.1.1.1): pone luces VERDES.
+    - Si no hay red: intenta crear un punto de acceso (AP) y pone luces AZULES.
+    """
+    try:
+        # Intenta conectar a DNS de Cloudflare (sin enviar datos, solo handshake TCP)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect(("1.1.1.1", 80))
+        s.close()
+        print("[Network] Wi-Fi conectado a infraestructura.")
+        if RL: RL.front_color('green')
     except Exception:
-        pass
-
-    return 0.0
-
-def read_ram_usage_mb_and_percent():
-    """
-    Devuelve (used_mb, percent) usando MemAvailable para cálculo real de uso.
-    """
-    meminfo = {}
-    with open("/proc/meminfo", "r") as f:
-        for line in f:
-            key, val = line.split(":", 1)
-            meminfo[key.strip()] = val.strip()
-
-    def _kb(field):
-        v = meminfo.get(field, "0 kB").split()[0]
+        print("[Network] Sin conexión. Intentando levantar Hotspot (AP)...")
+        if RL: RL.front_color('blue')
         try:
-            return int(v)
-        except Exception:
-            return 0
+            # Script de sistema para modo AP (requiere configuración previa en SO)
+            os.system("sudo create_ap wlan0 eth0 Adeept_Robot &")
+        except: pass
 
-    total_kb = _kb("MemTotal")
-    avail_kb = _kb("MemAvailable")  # mejor indicador de memoria disponible real
-    used_kb = max(0, total_kb - avail_kb)
+def servoPosInit():
+    """Restablece los servos a su posición segura (Home)."""
+    RPIservo.move(SERVO_STEERING, 88.5) # Centro dirección
+    RPIservo.move(SERVO_TILT, 40)       # Cabeza levemente abajo
+    RPIservo.move(SERVO_PAN, 85)        # Cabeza al frente
 
-    used_mb = used_kb // 1024
-    percent = 0.0 if total_kb == 0 else (used_kb * 100.0 / total_kb)
-    return used_mb, round(percent, 1)
-
-def robotCtrl(command_input, response):
-    """Traduce comandos básicos a acciones de motor/servo/luces."""
+# =================== Lógica de Control del Robot ===================
+def robotCtrl(cmd, ws_obj):
+    """
+    Intérprete de comandos de bajo nivel.
+    Mapea instrucciones textuales a acciones de hardware.
+    
+    Args:
+        cmd (str): Comando recibido (ej. 'forward', 'left').
+        ws_obj: Objeto WebSocket (no usado directamente aquí, pero disponible para feedback).
+    """
     global direction_command, turn_command, speed_set
 
-    if command_input == 'forward':
-        direction_command = 'forward'
+    # --- Control de Tracción (Motores DC) ---
+    if cmd == 'forward':
         move.forward(speed_set)
         if RL: RL.front_color('blue')
-
-    elif command_input == 'backward':
-        direction_command = 'backward'
+    elif cmd == 'backward':
         move.backward(speed_set)
-        if RL: RL.front_color('red')  # rojo al retroceder
-
-    elif 'DS' in command_input:  # Stop
-        direction_command = 'no'
-        move.stop()
+        if RL: RL.front_color('red') # Luz de freno/reversa
+    elif cmd == 'DS': # Drive Stop: Detención inmediata
+        move.motorStop()
         if RL: RL.front_all_off()
-
-    elif 'TS' in command_input:  # Straight steering
-        turn_command = 'no'
+    elif cmd == 'TS': # Turn Stop: Centrar dirección
         RPIservo.move(SERVO_STEERING, 88.5)
-        if RL: RL.front_all_off()
+        
+    # --- Control de Dirección (Servo Eje Delantero) ---
+    elif cmd == 'left':
+        RPIservo.move(SERVO_STEERING, 120) # Límite izquierdo
+        if RL: RL.front_turn_left()
+    elif cmd == 'right':
+        RPIservo.move(SERVO_STEERING, 50)  # Límite derecho
+        if RL: RL.front_turn_right()
+        
+    # --- Control de Cámara (Servos Pan/Tilt) ---
+    elif cmd == 'up':
+        RPIservo.move(SERVO_TILT, 110) # Mirar arriba
+    elif cmd == 'down':
+        RPIservo.move(SERVO_TILT, 65)  # Mirar abajo
+    elif cmd == 'home':
+        servoPosInit()
+    elif cmd == 'lookleft':
+        RPIservo.move(SERVO_PAN, 120)
+    elif cmd == 'lookright':
+        RPIservo.move(SERVO_PAN, 50)
 
-    elif command_input == 'left':
-        turn_command = 'left'
-        RPIservo.move(SERVO_STEERING, 120)
-        if RL: RL.front_turn_left()  # en tu clase ahora pone blanco
-
-    elif command_input == 'right':
-        turn_command = 'right'
-        RPIservo.move(SERVO_STEERING, 50)
-        if RL: RL.front_turn_right()  # blanco
-
-    elif command_input == 'up':
-        RPIservo.move(SERVO_TILT, 110)
-
-    elif command_input == 'down':
-        RPIservo.move(SERVO_TILT, 65)
-
-    elif command_input == 'home':
-        RPIservo.move(SERVO_TILT, 63)
-
-# =================== WebSocket server ===================
+# =================== Lógica del Servidor WebSocket ===================
 async def recv_msg(websocket, path):
-    """Bucle principal de mensajes después del login."""
+    """
+    Bucle principal de comunicación WebSocket por cliente.
+    Recibe, parsea y ejecuta comandos en tiempo real.
+    """
     global speed_set
-    loop = asyncio.get_event_loop()
-
+    
     while True:
         try:
             data = await websocket.recv()
 
-            # ---- Comandos básicos de texto ----
+            # -----------------------------------------------
+            # 1. Comandos de Movimiento Directo
+            # -----------------------------------------------
             if data in ['forward', 'backward', 'DS', 'TS', 'left', 'right',
                         'lookleft', 'lookright', 'up', 'down', 'home']:
                 robotCtrl(data, websocket)
 
-            # ---- Velocidad: "Speed <valor>" ----
+            # -----------------------------------------------
+            # 2. Configuración de Velocidad
+            # -----------------------------------------------
             elif data.startswith('Speed'):
                 try:
-                    _, val = data.split()
-                    speed_set = move.speed_set(int(val))
-                except Exception:
-                    pass
+                    val = int(data.split()[1])
+                    speed_set = move.speed_set(val) # Actualiza valor y retorna el limitado
+                except: pass
 
-            # ---- Radar (scan único) ----
-            elif data == 'scan':
-                scan_data = fuc.radarScan()
-                await websocket.send(json.dumps({
-                    'title': 'scanResult',
-                    'data': scan_data
-                }))
-
-            # ---- QR (scan rq)
-            elif data == 'scanQR':
-                try:
-                    Camera.get_instance().modeselect('scanQR')
-                except Exception as e:
-                    print(f"[WS] No se pudo activar scanQR: {e}")
-
-            # ---- Modo seguimiento de línea ----
+            # -----------------------------------------------
+            # 3. Modos Autónomos (Computer Vision)
+            # -----------------------------------------------
             elif data == 'trackLine':
-                if RL: RL.front_color('yellow')
+                # Activa seguimiento de línea
+                if RL: RL.front_color('white')
                 fuc.modeSet('trackLine')
-                camera_mode('trackline')
+                
+            elif data == 'findColor':
+                # Activa búsqueda de color (Feature legacy)
+                if RL: RL.front_color('yellow')
+                Camera().modeselect('findColor')
 
-            elif data == 'pauseFunctions':
-                if RL: RL.front_color('black')
+            elif data == 'stopCV' or data == 'pauseFunctions':
+                # Detiene cualquier modo autónomo
+                if RL: RL.front_color('black') # Luces apagadas
                 fuc.pause()
-                camera_mode('none')
+                Camera().modeselect('none')
 
-            # ---- Telemetría sistema ----
+            # -----------------------------------------------
+            # 4. Telemetría de Sistema
+            # -----------------------------------------------
             elif data == 'get_info':
-                cpu_temp_raw = os.popen("cat /sys/class/thermal/thermal_zone0/temp").readline()
-                cpu_temp = round(float(cpu_temp_raw) / 1000, 2)
-                cpu_usage = os.popen("top -n1 | awk '/Cpu/ {print $2}'").readline().strip()
-                ram_usage = os.popen("free -m | awk 'NR==2{print $3}'").readline().strip()
-                await websocket.send(json.dumps({
+                # Responde con un JSON conteniendo estado de salud del sistema
+                info = json.dumps({
                     'title': 'info_update',
                     'data': {
-                        'CPU_Temp': cpu_temp,
-                        'CPU_Usage': cpu_usage,
-                        'RAM_Usage': ram_usage
+                        'CPU_Temp': get_cpu_temp(),   # ºC
+                        'CPU_Usage': get_cpu_usage(), # %
+                        'RAM_Usage': get_ram_usage()  # %
                     }
-                }))
+                })
+                await websocket.send(info)
 
-            # ---- Visión por computadora ----
-            elif data == 'findColor':
-                if RL: RL.front_color('black')
-                app.flask_app.modeselect('findColor')
-
-            elif data == 'motionGet':
-                app.flask_app.modeselect('watchDog')
-
-            elif data == 'stopCV':
-                app.flask_app.modeselect('none')
-
-            elif data.startswith('FCSET'):
-                try:
-                    _, h, s, v = data.split()
-                    app.flask_app.colorFindSet(int(h), int(s), int(v))
-                except Exception:
-                    pass
-
-            # ---- Modos de luces especiales ----
-            elif data == 'police':
-                if RL: RL.police()
-
-            elif data == 'rainbow':
-                if RL: RL.rainbow()
+            # -----------------------------------------------
+            # 5. Mantenimiento de Conexión
+            # -----------------------------------------------
+            elif data == 'ping':
+                pass # Keep-alive
 
         except websockets.exceptions.ConnectionClosed:
-            print("Cliente desconectado")
-            move.stop()
+            print("[WebSocket] Cliente desconectado (ConnectionClosed)")
+            move.motorStop() # Seguridad: Detener robot si se pierde control
             break
         except Exception as e:
-            print(f"[WS] Error procesando comando: {e}")
+            print(f"[WebSocket] Error de protocolo: {e}")
+            break
 
 async def main_logic(websocket, path):
-    """Login simple por primer mensaje."""
+    """
+    Handshake inicial de conexión WebSocket.
+    Implementa autenticación básica antes de permitir control.
+    """
     try:
+        # Espera credenciales como primer mensaje
         auth = await websocket.recv()
+        # Credenciales harcodeadas (Por defecto de fábrica)
         if auth.strip() == "admin:123456":
             await websocket.send("congratulation")
-            await recv_msg(websocket, path)
+            await recv_msg(websocket, path) # Transferir a bucle de comandos
         else:
             await websocket.send("sorry")
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except: pass
 
-# =================== Main ===================
+# =================== Punto de Entrada Principal ===================
 if __name__ == '__main__':
-    # Motor único en canal A
+    print("[Init] Inicializando sistema Adeept PiCar-B...")
+    
+    # 1. Inicialización de Hardware Base (Motores/Servos)
     move.setup()
-
-    # Servos a home
+    RPIservo.init() if hasattr(RPIservo, 'init') else None 
     servoPosInit()
 
-    # Arranque de servidor de cámara/FPV (tu app debe exponer flask_app)
-    # Si tu implementación requiere otra inicialización, ajústalo aquí.
+    # 2. Inicialización de Subsistema de Iluminación
     try:
-        app.flask_app.startthread()
-    except Exception:
-        try:
-            flask_app = app.webapp()
-            flask_app.startthread()
-            app.flask_app = flask_app
-        except Exception as e:
-            print(f"[camera] Aviso: no se pudo iniciar el hilo de cámara: {e}")
+        RL = robotLight.RobotLight()
+    except Exception as e:
+        print(f"[Init] Error iniciando luces: {e}")
+        RL = None
 
-    Camera.get_instance().start_background_feed()
+    # 3. Inicialización de Controlador Autónomo (Hilo independiente)
+    fuc = functions.Functions()
+    fuc.start()
 
+    # 4. Inicialización de Cámara (Singleton)
+    # Nota: Instanciar Camera() configura el hardware, los hilos de captura se inician internamente.
+    try:
+        cam = Camera()
+        print("[Init] Cámara iniciada y lista.")
+    except Exception as e:
+        print(f"[Init] Error crítico en cámara: {e}")
 
-    # Señalización de red (usa RobotLight API actual)
+    # 5. Servidor de Streaming de Video (Flask)
+    # Se ejecuta en un hilo Demonio para no bloquear el Event Loop de asyncio.
+    try:
+        flask_thread = threading.Thread(target=lambda: app.app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False))
+        flask_thread.daemon = True
+        flask_thread.start()
+        print("[Init] Servidor Video (Flask) escuchando en puerto 5000")
+    except Exception as e:
+        print(f"[Init] Error iniciando Flask: {e}")
+
+    # 6. Comprobación de Red
     wifi_check()
 
-    # WebSocket en 0.0.0.0:8888
+    # 7. Servidor de Control (WebSocket)
+    print("[Init] Servidor Control (WebSocket) iniciando en puerto 8888...")
+    
+    # Configuración del Event Loop de Asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     start_server = websockets.serve(main_logic, '0.0.0.0', 8888)
-    asyncio.get_event_loop().run_until_complete(start_server)
 
     try:
-        asyncio.get_event_loop().run_forever()
+        loop.run_until_complete(start_server)
+        print("[System] Sistema en línea. Esperando conexiones.")
+        loop.run_forever()
     except KeyboardInterrupt:
-        pass
+        print("\n[System] Apagando sistema ordenadamente...")
     finally:
-        move.stop()
+        # Limpieza de recursos al salir (CTRL+C)
+        move.motorStop()
         move.destroy()
-        RPIservo.cleanup()
         if RL: RL.cleanup()

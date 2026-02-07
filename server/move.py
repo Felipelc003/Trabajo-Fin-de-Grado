@@ -1,207 +1,110 @@
 #!/usr/bin/env python3
 # File name   : move.py
-# Description : Control Motor
-# Product     : GWR
-# Website     : www.gewbot.com
-# Author      : William
-# Date        : 2019/07/24
+# Description : Control del Motor DC (Canal B - Tracción Trasera)
+
 import time
 import RPi.GPIO as GPIO
 
-# ========= Configuración =========
-# En PiCar-B se usa UN solo canal del HAT de motor. Tu motor está en A.
-SELECTED_CHANNEL = 'A'   # 'A' o 'B' (tú usas A)
+# ==========================================
+# Configuración de Pines (BCM) - Motor B
+# ==========================================
+# Ojo aquí: Si ves que el coche va al revés cuando le dices "adelante",
+# solo tienes que cambiar los números de PIN_IN1 y PIN_IN2.
+PIN_EN   = 4   # Enable (PWM) -> Esto controla la potencia/velocidad
+PIN_IN1  = 14  # Input 1
+PIN_IN2  = 15  # Input 2
 
-# Pines (BCM) del driver:
-Motor_A_EN    = 4
-Motor_B_EN    = 17
-Motor_A_Pin1  = 14
-Motor_A_Pin2  = 15
-Motor_B_Pin1  = 27
-Motor_B_Pin2  = 18
+# Estado Global
+_pwm = None
+_current_speed = 70  # Velocidad por defecto (0-100)
 
-# Direcciones:
-Dir_forward   = 0
-Dir_backward  = 1
-
-# Estado interno:
-_pwm = None          # PWM del canal elegido
-_pwm_started = False
-_EN  = None          # pin EN del canal elegido
-_IN1 = None          # pin IN1 del canal elegido
-_IN2 = None          # pin IN2 del canal elegido
-_current_speed = 60  # % duty (0–100)
-
-# ========= Utilidades internas =========
-def _clamp_speed(v):
-    try:
-        v = int(v)
-    except:
-        v = _current_speed
-    return max(0, min(100, v))
-
-def _ensure_pwm_started():
-    global _pwm_started
-    if _pwm is not None and not _pwm_started:
-        try:
-            _pwm.start(0)
-        except RuntimeError:
-            # Si ya estaba iniciado en otro sitio, lo ignoramos
-            pass
-        _pwm_started = True
-
-def _apply(status, direction, speed):
-    """Aplica orden al ÚNICO motor: on/off + sentido + PWM."""
-    if status == 0:
-        # Parar y deshabilitar EN
-        GPIO.output(_IN1, GPIO.LOW)
-        GPIO.output(_IN2, GPIO.LOW)
-        GPIO.output(_EN, GPIO.LOW)
-        return
-
-    s = _clamp_speed(speed)
-
-    # Sentido
-    if direction == Dir_backward:
-        GPIO.output(_IN1, GPIO.HIGH)
-        GPIO.output(_IN2, GPIO.LOW)
-    else:  # Dir_forward
-        GPIO.output(_IN1, GPIO.LOW)
-        GPIO.output(_IN2, GPIO.HIGH)
-
-    # PWM (habilita EN y aplica duty)
-    GPIO.output(_EN, GPIO.HIGH)
-    _ensure_pwm_started()
-    if _pwm is not None:
-        try:
-            _pwm.ChangeDutyCycle(s)
-        except RuntimeError:
-            # Si el PWM no está listo por alguna razón, reintenta iniciar
-            try:
-                _pwm.start(0)
-                _pwm.ChangeDutyCycle(s)
-            except Exception as e:
-                print(f"[move] Error aplicando PWM: {e}")
-
-# ========= API pública =========
 def setup():
-    """Inicializa GPIO y selecciona canal A o B. Idempotente: se puede llamar varias veces."""
-    global _pwm, _EN, _IN1, _IN2, _pwm_started
-    GPIO.setwarnings(False)
-    # No cambiamos el modo si ya estaba configurado por otra parte del programa.
-    try:
-        GPIO.getmode()
-    except Exception:
-        pass
+    """Inicializa los pines GPIO y el PWM."""
+    global _pwm
     GPIO.setmode(GPIO.BCM)
-
-    # Config de pines (idempotente)
-    for p in (Motor_A_EN, Motor_B_EN, Motor_A_Pin1, Motor_A_Pin2, Motor_B_Pin1, Motor_B_Pin2):
-        try:
-            GPIO.setup(p, GPIO.OUT)
-        except RuntimeError:
-            # Si ya estaba configurado, seguimos
-            pass
-
-    # Resolver canal
-    if SELECTED_CHANNEL.upper() == 'A':
-        _EN, _IN1, _IN2 = Motor_A_EN, Motor_A_Pin1, Motor_A_Pin2
-    else:
-        _EN, _IN1, _IN2 = Motor_B_EN, Motor_B_Pin1, Motor_B_Pin2
-
-    motorStop()
-
-    # Crear PWM solo si no existe
-    if _pwm is None:
-        try:
-            _pwm = GPIO.PWM(_EN, 1000)  # 1kHz
-            _pwm_started = False
-        except RuntimeError as e:
-            # Otro PWM puede estar asociado ya; en ese caso asumimos que lo gestiona otro init
-            print(f"[move] Aviso: PWM ya existente en GPIO { _EN }: {e}")
-            _pwm = None
-            _pwm_started = False
-    else:
-        # Si ya existe, aseguramos frecuencia y duty 0
-        try:
-            _pwm.ChangeFrequency(1000)
-            _ensure_pwm_started()
-            _pwm.ChangeDutyCycle(0)
-        except Exception as e:
-            print(f"[move] Aviso al reconfigurar PWM existente: {e}")
-
-def motorStop():
-    """Para el motor y deshabilita EN (sin detener el objeto PWM)."""
+    GPIO.setwarnings(False)
+    
+    # Configurar pines como salida
+    GPIO.setup(PIN_EN, GPIO.OUT)
+    GPIO.setup(PIN_IN1, GPIO.OUT)
+    GPIO.setup(PIN_IN2, GPIO.OUT)
+    
+    # Arrancamos el PWM a 1000Hz. Es el pulso que le da fuerza al motor.
     try:
-        GPIO.output(_IN1, GPIO.LOW)
-        GPIO.output(_IN2, GPIO.LOW)
-        GPIO.output(_EN, GPIO.LOW)
-    except Exception:
-        pass
+        _pwm = GPIO.PWM(PIN_EN, 1000)
+        _pwm.start(0) # Empieza parado (ciclo 0)
+    except Exception as e:
+        print(f"[Move] Error iniciando PWM: {e}")
 
-def stop():
-    """Alias claro."""
-    motorStop()
-
-def speed_set(v=None):
-    """Ajusta/consulta la velocidad por defecto (0–100)."""
+def speed_set(speed_value):
+    """Actualiza la variable global de velocidad."""
     global _current_speed
-    if v is None:
-        return _current_speed
-    _current_speed = _clamp_speed(v)
+    try:
+        val = int(speed_value)
+        # Limitamos la velocidad (0 a 100)
+        _current_speed = max(0, min(100, val))
+    except ValueError:
+        pass
     return _current_speed
 
 def forward(speed=None):
-    """Avanza (el servo de dirección se controla en otro módulo)."""
-    s = _current_speed if speed is None else _clamp_speed(speed)
-    _apply(1, Dir_forward, s)
+    """Mueve el motor hacia adelante."""
+    global _current_speed
+    
+    # Si no se pasa velocidad, usar la global
+    s = speed if speed is not None else _current_speed
+    s = max(0, min(100, int(s)))
+    
+    # Pin_IN1 y Pin_IN2 determina la dirección hacia delante
+    GPIO.output(PIN_IN1, GPIO.LOW)
+    GPIO.output(PIN_IN2, GPIO.HIGH)
+    
+    if _pwm:
+        _pwm.ChangeDutyCycle(s)
 
 def backward(speed=None):
-    """Retrocede."""
-    s = _current_speed if speed is None else _clamp_speed(speed)
-    _apply(1, Dir_backward, s)
+    """Mueve el motor hacia atrás."""
+    global _current_speed
+    
+    s = speed if speed is not None else _current_speed
+    s = max(0, min(100, int(s)))
+    
+    # Invertimos la polaridad de los pines: ahora IN1 es HIGH y IN2 es LOW
+    GPIO.output(PIN_IN1, GPIO.HIGH)
+    GPIO.output(PIN_IN2, GPIO.LOW)
+    
+    if _pwm:
+        _pwm.ChangeDutyCycle(s) # Indica la potencia a la uqe debe ir el motor
 
-# ========= Compatibilidad con código existente =========
-def motor(status, direction, speed=None):
-    """
-    Compat: motor(1|0, 0|1, [speed])
-    - status: 1 on / 0 off
-    - direction: 0 forward / 1 backward
-    - speed: opcional, usa la global si es None
-    """
-    if status == 0:
-        stop(); return
-    s = _current_speed if speed is None else _clamp_speed(speed)
-    _apply(1, direction, s)
+def stop():
+    """Detiene el motor."""
+    GPIO.output(PIN_IN1, GPIO.LOW)
+    GPIO.output(PIN_IN2, GPIO.LOW)
+    if _pwm:
+        _pwm.ChangeDutyCycle(0) # Potencia cero
+
+# Alias para compatibilidad con webServer.py / functions.py
+motorStop = stop
 
 def destroy():
-    global _pwm, _pwm_started
-    try:
-        motorStop()
-        if _pwm is not None:
-            try:
-                _pwm.ChangeDutyCycle(0)
-            except Exception:
-                pass
-            try:
-                _pwm.stop()
-            except Exception:
-                pass
-            _pwm = None
-            _pwm_started = False
-    finally:
+    """Libera los recursos GPIO al cerrar."""
+    stop()
+    if _pwm:
         try:
-            GPIO.cleanup()
-        except Exception:
-            pass
+            _pwm.stop()
+        except: pass
+    GPIO.cleanup() # Libera los pines GPIO
 
 if __name__ == '__main__':
+    # Test simple si se ejecuta directamente
     try:
         setup()
-        speed_set(60)
-        forward(); time.sleep(1.0)
-        stop();   time.sleep(0.2)
-        backward(); time.sleep(1.0)
+        print("Test: Adelante 50%")
+        forward(50)
+        time.sleep(2)
+        print("Test: Atrás 50%")
+        backward(50)
+        time.sleep(2)
         stop()
         destroy()
     except KeyboardInterrupt:
