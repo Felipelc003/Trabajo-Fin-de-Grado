@@ -1,4 +1,28 @@
 #!/usr/bin/env python3
+#
+# This file is part of  Diseño Modular e Incremental para la 
+# Navegación Autónoma Contextual en Sistemas Embebidos de Bajo Coste
+#
+# Copyright 2026 Felipe López Castro <i12locaf@uco.es>
+#
+# Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste is free software: you can redistribute it 
+# and/or modify it under the terms of the GNU General Public License 
+# as published by the Free Software Foundation, either version 3 of the License, 
+# or  (at your option) any later version.
+# 
+# Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste is distributed in the hope that it will be useful, 
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste.
+# If not, see <https://www.gnu.org/licenses/>.
+#
+
 # Nombre del archivo: RPIservo.py
 # Descripción: Módulo de control para servomotores utilizando el controlador PWM PCA9685.
 # Este script gestiona la comunicación I2C y proporciona una interfaz de alto nivel para posicionar los servos.

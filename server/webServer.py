@@ -1,6 +1,30 @@
 #!/usr/bin/env python3
-# File name   : webServer.py
-# Description : Servidor Principal del Sistema.
+#
+# This file is part of  Diseño Modular e Incremental para la 
+# Navegación Autónoma Contextual en Sistemas Embebidos de Bajo Coste
+#
+# Copyright 2026 Felipe López Castro <i12locaf@uco.es>
+#
+# Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste is free software: you can redistribute it 
+# and/or modify it under the terms of the GNU General Public License 
+# as published by the Free Software Foundation, either version 3 of the License, 
+# or  (at your option) any later version.
+# 
+# Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste is distributed in the hope that it will be useful, 
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Diseño Modular e Incremental para la Navegación Autónoma Contextual 
+# en Sistemas Embebidos de Bajo Coste.
+# If not, see <https://www.gnu.org/licenses/>.
+#
+
+# Nombre del archivo: webServer.py
+# Descripción: Servidor Principal del Sistema.
 #               Integra múltiples servicios Concurrentes:
 #               1. Servidor WebSocket (Puerto 8888): Control remoto en tiempo real y telemetría.
 #               2. Servidor Flask (Puerto 5000): Streaming de video HTTP.

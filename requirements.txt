@@ -7,3 +7,4 @@ numpy
 websockets
 pyzbar
 RPi.GPIO
+gpiozero
